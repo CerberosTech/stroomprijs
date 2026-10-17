@@ -1,23 +1,30 @@
 // Stroomprijs static site builder. No dependencies (Node >= 18).
 // Fetches day-ahead power + gas prices from the public EnergyZero API (no key), falls back to data/prices.json.
+// The price components (hero, planner, chart, hour list, stats, gas) come from lib/render.mjs: rendered here for the
+// first paint and the no-JS fallback, and again in the browser for the real current hour and the chosen price mode.
 import fs from 'node:fs'; import path from 'node:path';
 import { logo, writeAssets } from './lib/brand.mjs';
 import { frontMatter, markdown } from './lib/markdown.mjs';
+import { makeRender } from './lib/render.mjs';
+import { CSS } from './lib/style.mjs';
 const SITE = 'https://cerberostech.github.io/stroomprijs';
 const BASE = '/stroomprijs';
 const OUT = 'dist';
 const API = 'https://api.energyzero.nl/v1/energyprices';
-const TZ = 'Europe/Amsterdam';
-const VAT = 1.21;
+const R = makeRender();
 
-// ---------- time helpers (Amsterdam) ----------
-const dtf = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' });
-const parts = d => Object.fromEntries(dtf.formatToParts(d).map(p => [p.type, p.value]));
-const ymd = d => { const p = parts(d); return `${p.year}-${p.month}-${p.day}`; };
-const hourOf = d => +parts(d).hour;
-const nlDate = s => new Date(s + 'T12:00:00Z').toLocaleDateString('nl-NL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
-const addDays = (s, n) => { const d = new Date(s + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+// Energiebelasting (energy tax) per year, excl. btw, first bracket (electricity 0–10.000 kWh, gas 0–170.000 m³).
+// Source: Belastingdienst, tabel energiebelasting. Checked 2026-10-17. Add the next year when it is published;
+// until then the latest known year is used and the method page says so.
+const TAX = {
+  vat: 1.21, fallback: '2026', checked: '2026-10-17',
+  source: 'https://www.belastingdienst.nl/wps/wcm/connect/bldcontentnl/belastingdienst/zakelijk/overige_belastingen/belastingen_op_milieugrondslag/energiebelasting',
+  rates: { 2026: { e: 0.09161, g: 0.60066 } },
+  reduction: { 2026: 519.80 }, // belastingvermindering per elektriciteitsaansluiting per jaar, excl. btw
+};
 
+// ---------- data ----------
+const addDays = (s, n) => R.addDay(s, n);
 async function fetchType(usageType, from, till) {
   const u = `${API}?fromDate=${from}&tillDate=${till}&interval=4&usageType=${usageType}&inclBtw=false`;
   const r = await fetch(u, { headers: { 'user-agent': 'stroomprijs (github.com/CerberosTech/stroomprijs)' } });
@@ -26,7 +33,7 @@ async function fetchType(usageType, from, till) {
   return j.Prices.map(p => ({ t: p.readingDate, p: p.price }));
 }
 async function getData() {
-  const now = new Date(); const today = ymd(now);
+  const now = new Date(); const today = R.at(+now).day;
   const from = new Date(Date.parse(addDays(today, -1) + 'T12:00:00Z')).toISOString();
   const till = new Date(Date.parse(addDays(today, 2) + 'T12:00:00Z')).toISOString();
   try {
@@ -42,393 +49,156 @@ async function getData() {
 }
 
 const data = await getData();
-const now = new Date(); const TODAY = ymd(now); const TOMORROW = addDays(TODAY, 1);
-const byDay = (arr, day) => arr.filter(x => ymd(new Date(x.t)) === day).map(x => ({ ...x, h: hourOf(new Date(x.t)), inc: x.p * VAT }));
-const P = { today: byDay(data.power, TODAY), tomorrow: byDay(data.power, TOMORROW) };
-const G = { today: byDay(data.gas, TODAY), tomorrow: byDay(data.gas, TOMORROW) };
-console.log(`power today ${P.today.length}h, tomorrow ${P.tomorrow.length}h; gas today ${G.today.length}h; status ${data.status}`);
+const now = new Date(); const TODAY = R.at(+now).day; const TOMORROW = addDays(TODAY, 1);
+const toH = a => a.map(x => ({ t: Date.parse(x.t), p: x.p })).filter(x => isFinite(x.t) && typeof x.p === 'number').sort((a, b) => a.t - b.t);
+const POWER = toH(data.power).filter(x => [TODAY, TOMORROW].includes(R.at(x.t).day));
+const GASD = toH(data.gas).filter(x => R.gasDay(x.t) >= addDays(TODAY, -1)); // gas days run 06:00–06:00; keep the one running now
+const byDay = (a, d) => a.filter(x => R.at(x.t).day === d);
+const P = { today: byDay(POWER, TODAY), tomorrow: byDay(POWER, TOMORROW) };
+console.log(`power today ${P.today.length}h, tomorrow ${P.tomorrow.length}h; gas ${GASD.length}h; status ${data.status}`);
+for (const y of new Set(POWER.map(x => R.at(x.t).day.slice(0, 4)))) if (!TAX.rates[y]) console.warn(`tax: no energiebelasting rates for ${y}, using ${TAX.fallback}. Update TAX in build.mjs.`);
+const D = { power: POWER.map(x => [x.t, x.p]), gas: GASD.map(x => [x.t, x.p]), tax: { vat: TAX.vat, rates: TAX.rates, fallback: TAX.fallback } };
+const S0 = { mode: 'kaal', opE: 0, opG: 0 };
+const C = R.ctx(D, S0, +now); // build-time context: the first paint until the browser takes over
 
-// ---------- analysis ----------
-const avg = a => a.reduce((s, x) => s + x.p, 0) / (a.length || 1);
-function cheapestBlock(a, n) {
-  let best = null;
-  for (let i = 0; i + n <= a.length; i++) { const s = a.slice(i, i + n); const m = avg(s); if (!best || m < best.avg) best = { start: s[0].h, end: (s[n - 1].h + 1) % 24, avg: m, hours: s, i }; }
-  return best;
-}
-const minOf = a => a.reduce((m, x) => (!m || x.p < m.p ? x : m), null);
-const maxOf = a => a.reduce((m, x) => (!m || x.p > m.p ? x : m), null);
-const hh = h => String(h).padStart(2, '0') + ':00';
-const span = h => `${hh(h)}–${hh((h + 1) % 24)}`;
-const nf = (v, d = 1) => v.toLocaleString('nl-NL', { minimumFractionDigits: d, maximumFractionDigits: d });
+// ---------- helpers ----------
+const { esc, nf, hh, span, nlDate } = R;
 const ct = (v, d = 1) => nf(v * 100, d) + ' ct';
-const eur = (v, d = 3) => '€ ' + v.toLocaleString('nl-NL', { minimumFractionDigits: d, maximumFractionDigits: d });
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fetchedNl = new Date(data.fetched).toLocaleString('nl-NL', { timeZone: TZ, dateStyle: 'medium', timeStyle: 'short' });
+const eur = (v, d = 3) => '€\u00a0' + nf(v, d);
+const fetchedNl = new Date(data.fetched).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', dateStyle: 'medium', timeStyle: 'short' });
+const yearRate = TAX.rates[TODAY.slice(0, 4)] || TAX.rates[TAX.fallback], rateYear = TAX.rates[TODAY.slice(0, 4)] ? TODAY.slice(0, 4) : TAX.fallback;
+const shortDate = s => new Date(s + 'T12:00:00Z').toLocaleDateString('nl-NL', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 
-// ---------- price chart (HTML bars: text stays readable at every screen width) ----------
-// Y axis in eurocent with "nice" ticks, zero baseline, daily average line, cheapest 3-hour block, current hour.
-// Interactive readout (pointer, touch, arrow keys) is progressive enhancement; the summary and the table carry the data without JS.
-let chartId = 0;
-function niceStep(range) { const raw = range / 4, p = 10 ** Math.floor(Math.log10(raw)); return [1, 2, 2.5, 5, 10].map(m => m * p).find(s => s >= raw - 1e-9); }
-function chart(a, label, nowH = -1, day = '') {
-  if (!a.length) return '<p class="empty">Nog geen prijzen beschikbaar. De day-ahead prijzen voor morgen komen meestal rond 13:00–15:00 uur binnen.</p>';
-  const id = `c${++chartId}`, v = a.map(x => x.p * 100), vmax = Math.max(0, ...v), vmin = Math.min(0, ...v);
-  const step = niceStep(vmax - vmin || 1), hi = Math.ceil(vmax / step - 1e-9) * step || step, lo = Math.floor(vmin / step + 1e-9) * step;
-  const y = c => ((c - lo) / (hi - lo) * 100).toFixed(2);
-  const n = Math.min(3, a.length), cb = cheapestBlock(a, n), ni = a.findIndex(x => x.h === nowH), mn = minOf(a), mx = maxOf(a), sel = ni >= 0 ? ni : a.indexOf(mn);
-  const ticks = []; for (let t = lo; t <= hi + 1e-9; t += step) ticks.push(Math.abs(t) < 1e-9 ? 0 : t);
-  const grid = ticks.map(t => `<span class="gl${t === 0 ? ' z' : ''}" style="bottom:${y(t)}%"><em>${nf(t, step < 1 ? 1 : 0)}</em></span>`).join('');
-  const cols = a.map((x, i) => {
-    const c = x.p * 100, cls = ['col', i === ni && 'now', i >= cb.i && i < cb.i + n && 'cheap', c < 0 && 'neg'].filter(Boolean).join(' ');
-    return `<span class="${cls}" style="--i:${i}" data-h="${x.h}" data-l="${span(x.h)}" data-n="${nf(c)}" data-i="${nf(x.inc * 100)}"><i style="bottom:${y(Math.min(c, 0))}%;height:${(Math.abs(c) / (hi - lo) * 100).toFixed(2)}%"></i></span>`;
-  }).join('');
-  const quiet = ni >= cb.i - 2 && ni <= cb.i + n + 1; // "nu" pin too close: drop the bracket text, keep the bracket
-  const marks = `<span class="mk-cb${quiet ? ' q' : ''}" style="grid-column:${cb.i + 1}/span ${n}"><em>goedkoopst</em></span>${ni >= 0 ? `<span class="mk-nu" style="grid-column:${ni + 1}">nu</span>` : ''}`;
-  const s = a[sel], first = ni >= 0 ? 'Nu' : 'Laagste uur';
-  const summary = `${label}. Gemiddeld ${ct(avg(a))} per kWh. Laagste prijs ${ct(mn.p)} van ${span(mn.h)}, hoogste ${ct(mx.p)} van ${span(mx.h)}. Goedkoopste blok van ${n} uur: ${hh(cb.start)}–${hh(cb.end)}, gemiddeld ${ct(cb.avg)}.${ni >= 0 ? ` Nu (${span(nowH)}): ${ct(a[ni].p)}.` : ''}`;
-  const neg = v.some(c => c < 0);
-  return `<figure class="chart">
-<p class="ro" aria-live="polite"><span class="ro-t">${first}, ${span(s.h)}</span> <b class="ro-v">${ct(s.p)}</b> <span class="ro-i">per kWh excl. btw, ${ct(s.inc)} incl. btw</span></p>
-<div class="plot" tabindex="0" role="group" aria-label="${esc(label)}: staafdiagram per uur. Gebruik de pijltjestoetsen om per uur de prijs te lezen." aria-describedby="${id}-s" data-day="${day}" data-sel="${sel}" style="--n:${a.length}">
-<span class="yt" aria-hidden="true">ct/kWh</span><div class="mk" aria-hidden="true">${marks}</div>
-<div class="area" aria-hidden="true">${grid}<div class="bars">${cols}</div><span class="avg" style="bottom:${y(avg(a) * 100)}%"></span></div>
-<div class="xa" aria-hidden="true">${a.map(x => `<span${x.h % 3 ? '' : ' class="k"'}>${String(x.h).padStart(2, '0')}</span>`).join('')}</div>
-</div>
-<p class="sr" id="${id}-s">${esc(summary)}</p>
-<figcaption class="lg"><span><i class="sw cheap"></i>Goedkoopste ${n} uur</span>${ni >= 0 ? '<span><i class="sw now"></i>Nu</span>' : ''}<span><i class="sw bar"></i>Overige uren</span>${neg ? '<span><i class="sw neg"></i>Negatieve prijs</span>' : ''}<span><i class="sw avgk"></i>Daggemiddelde</span><span class="lg-u">Eurocent per kWh, excl. btw</span></figcaption>
-</figure>`;
-}
-function table(a, unit = 'kWh') {
-  if (!a.length) return '';
-  return `<details class="tbl"><summary>Alle uurprijzen in een tabel</summary><div class="tbl-w"><table><thead><tr><th scope="col">Uur</th><th scope="col">Excl. btw</th><th scope="col">Incl. 21% btw</th></tr></thead><tbody>${a.map(x => `<tr><td>${hh(x.h)}–${hh((x.h + 1) % 24)}</td><td>${eur(x.p, 4)}</td><td>${eur(x.inc, 4)}</td></tr>`).join('')}</tbody></table></div><p class="note">Prijs per ${unit}. Kale marktprijs; zonder energiebelasting, netbeheerkosten en opslag van je leverancier.</p></details>`;
-}
-function stats(a) {
-  if (a.length < 3) return '';
-  const mn = minOf(a), mx = maxOf(a), cb = cheapestBlock(a, 3);
-  return `<dl class="stats"><div><dt>Gemiddeld</dt><dd>${ct(avg(a))}</dd><dd class="s">per kWh</dd></div><div><dt>Laagste</dt><dd>${ct(mn.p)}</dd><dd class="s">${span(mn.h)}</dd></div><div><dt>Hoogste</dt><dd>${ct(mx.p)}</dd><dd class="s">${span(mx.h)}</dd></div><div class="hl"><dt>Goedkoopste 3 uur</dt><dd>${hh(cb.start)}–${hh(cb.end)}</dd><dd class="s">gem. ${ct(cb.avg)}</dd></div></dl>`;
-}
+// ---------- icons ----------
 const ICON = {
   was: '<rect x="4" y="2.5" width="16" height="19" rx="3"/><circle cx="12" cy="13.5" r="4.5"/><path d="M7.5 6h2"/>',
-  auto: '<path d="M9 2.5v4.5M15 2.5v4.5M6.5 7h11v3.5a5.5 5.5 0 0 1-11 0zM12 16v5.5"/>',
   vaat: '<rect x="4" y="2.5" width="16" height="19" rx="3"/><path d="M4 8h16M7.5 5.2h1.5M9 12.5v5M12 12.5v5M15 12.5v5"/>',
+  droog: '<rect x="4" y="2.5" width="16" height="19" rx="3"/><circle cx="12" cy="13.5" r="4.5"/><path d="M10 12.2c1-.8 3-.8 4 0M10 14.8c1-.8 3-.8 4 0M7.5 6h2"/>',
+  auto: '<path d="M9 2.5v4.5M15 2.5v4.5M6.5 7h11v3.5a5.5 5.5 0 0 1-11 0zM12 16v5.5"/>',
+  eigen: '<path d="M13 2.5 6 13h6l-1 8.5 7-10.5h-6z"/>',
+  cal: '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+  rss: '<path d="M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/><circle cx="6" cy="18" r="1.2"/>',
 };
 const ico = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[k]}</svg>`;
-function advice(a, dayWord) {
-  if (a.length < 4) return '';
-  const w = cheapestBlock(a, 2), c = cheapestBlock(a, 4), d = cheapestBlock(a, 3);
-  const tip = (k, title, b, n) => `<li><span class="ti">${ico(k)}</span><div><b>${title}</b><span class="tr">${hh(b.start)}–${hh(b.end)}</span><span class="td">${n} uur, gem. ${ct(b.avg)}/kWh</span></div></li>`;
-  return `<ul class="tips">${tip('was', `Wasmachine ${dayWord}`, w, 2)}${tip('auto', `Auto laden ${dayWord}`, c, 4)}${tip('vaat', 'Vaatwasser / droger', d, 3)}</ul><p class="note">Berekend op de kale day-ahead prijs. Belasting en opslag zijn per kWh gelijk over de dag, dus het goedkoopste moment blijft hetzelfde.</p>`;
-}
 
-// ---------- dagband: 48 hours at a glance, coloured from cheap to expensive ----------
-function dagband(rows, nowH) {
-  const all = rows.flatMap(r => r[1]); if (!all.length) return '';
-  const lo = minOf(all).p, hi = maxOf(all).p, lvl = p => (hi === lo ? 2 : Math.min(4, Math.floor((p - lo) / (hi - lo) * 5)));
-  const said = [];
-  const html = rows.map(([name, a, day, isToday]) => {
-    if (a.length < 3) return `<div class="db-row"><span class="db-l">${name}</span><p class="db-empty">De prijzen voor morgen komen meestal rond 13:00–15:00 uur binnen.</p></div>`;
-    const cb = cheapestBlock(a, 3), ni = isToday ? a.findIndex(x => x.h === nowH) : -1, mx = maxOf(a);
-    said.push(`${name} goedkoopst van ${hh(cb.start)} tot ${hh(cb.end)}, het duurst van ${span(mx.h)}`);
-    return `<div class="db-row"><span class="db-l">${name}</span><div class="db-g" data-day="${day}" style="--n:${a.length}"><span class="db-cb" style="grid-column:${cb.i + 1}/span 3"></span>${a.map((x, i) => `<i class="l${lvl(x.p)}${i === ni ? ' now' : ''}" data-h="${x.h}" style="grid-column:${i + 1}"></i>`).join('')}${ni >= 0 ? `<span class="db-nu" style="grid-column:${ni + 1}">nu</span>` : ''}</div></div>`;
-  }).join('');
-  return `<div class="db" role="img" aria-label="${esc(`Prijsniveau per uur. ${said.join('. ')}.`)}">${html}<div class="db-row db-xr" aria-hidden="true"><span></span><div class="db-x">${[0, 6, 12, 18].map(h => `<span>${hh(h)}</span>`).join('')}</div></div></div>
-<p class="db-lg" aria-hidden="true"><span class="db-sc">Goedkoop <i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i> Duur</span><span class="db-k">Goedkoopste 3 uur</span></p>`;
+// ---------- shared blocks ----------
+// Typical use per run: rough example values, editable in the planner and labelled as such.
+const DEVICES = [['was', 'Wasmachine', 2, 1], ['vaat', 'Vaatwasser', 3, 1], ['droog', 'Wasdroger', 2, 2], ['auto', 'Elektrische auto', 4, 20], ['eigen', 'Eigen apparaat', 1, 1]];
+function planner(w = 'nu') {
+  const [, label, n, kwh] = DEVICES[0], q = { label, n, kwh, w };
+  const opt = (v, t) => `<option value="${v}"${v === w ? ' selected' : ''}>${t}</option>`;
+  return `<section class="sec" aria-labelledby="plan-h"><div class="sec-h"><h2 id="plan-h">Wanneer zet je hem aan?</h2></div>
+<p class="lede">Het goedkoopste aaneengesloten blok uren voor je apparaat${w === 'nu' ? ', ook over middernacht heen' : ''}, en wat het kost.</p>
+<form id="planner" class="pl js-only"><fieldset class="dev"><legend class="sr">Apparaat</legend>${DEVICES.map(([k, t, dn, dk], i) => `<label><input type="radio" name="dev" value="${k}" data-label="${t}" data-n="${dn}" data-kwh="${dk}"${i ? '' : ' checked'}><span>${ico(k)}${t}</span></label>`).join('')}</fieldset>
+<div class="pl-row"><label for="pl-n">Hoe lang<select id="pl-n" name="n">${Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}"${i + 1 === n ? ' selected' : ''}>${i + 1} uur</option>`).join('')}</select></label><label for="pl-kwh">Verbruik in kWh<input id="pl-kwh" name="kwh" type="text" inputmode="decimal" autocomplete="off" value="${kwh}"></label><label for="pl-w">Wanneer<select id="pl-w" name="w">${opt('nu', 'Vanaf nu')}${opt('today', 'Rest van vandaag')}${opt('tomorrow', 'Morgen')}</select></label></div></form>
+<p class="sr" id="plan-say" aria-live="polite"></p><div class="pl-out" data-c="plan">${R.plan(C, q)}</div>
+<div class="pl-act js-only"><button class="btn" id="plan-ics" type="button">${ico('cal')}Zet dit blok in je agenda</button></div>
+<p class="note">Het verbruik per keer is een voorbeeldwaarde. Pas het aan voor je eigen apparaat; het staat in de handleiding of op het energielabel. We rekenen alsof het apparaat gelijkmatig verbruikt over het blok.</p></section>`;
 }
+const modebar = (gas = false) => `<div class="modebar js-only" role="group" aria-label="Prijzen tonen als"><div class="seg"><label><input type="radio" name="mode" value="kaal" checked><span>Kale marktprijs</span></label><label><input type="radio" name="mode" value="all"><span>Schatting all-in</span></label></div><p class="mb-n"><a href="${BASE}/zo-rekenen-we/">Zo rekenen we</a></p>
+<div class="mode-opt" hidden><span>Schatting = (marktprijs + opslag + energiebelasting) × 1,21. Energiebelasting ${rateYear}: ${gas ? `${eur(yearRate.g, 5)} per m³` : `${nf(yearRate.e * 100, 3)} ct per kWh`}, excl. btw.</span>${gas ? '' : '<label for="opE">Opslag van je leverancier<input id="opE" type="text" inputmode="decimal" autocomplete="off" value="0"> ct/kWh</label>'}${gas ? '<label for="opG">Opslag van je leverancier<input id="opG" type="text" inputmode="decimal" autocomplete="off" value="0"> €/m³</label>' : ''}<span>Opslag excl. btw, zie je contract. Vaste kosten zitten er niet in.</span></div></div>`;
+const daySec = (k, title) => `<section class="sec" aria-labelledby="dag-h"><div class="sec-h"><h2 id="dag-h">${title}</h2>${k === 'sel' ? '<div class="tabs js-only" role="group" aria-label="Kies de dag"><button type="button" data-day-tab="today" aria-pressed="true">Vandaag</button><button type="button" data-day-tab="tomorrow" aria-pressed="false">Morgen</button></div>' : ''}<p class="d" data-c="date" data-day="${k}">${R.date(C, k === 'sel' ? 'today' : k)}</p></div>
+<div class="day-g"><div><div data-c="chart" data-day="${k}">${R.chart(C, k === 'sel' ? 'today' : k, null)}</div><div data-c="stats" data-day="${k}">${R.stats(C, k === 'sel' ? 'today' : k)}</div></div><div class="hl-w" data-c="list" data-day="${k}">${R.list(C, k === 'sel' ? 'today' : k, null)}</div></div>
+<p class="note">Prijsklasse A tot G: zeven gelijke stappen tussen het goedkoopste en het duurste uur van die dag. A is dus relatief goedkoop voor die dag, geen vaste grens.</p></section>`;
+const stale = `<p class="stale" id="stale" hidden>Deze pagina heeft nog geen prijs voor het huidige uur. Herlaad de pagina om de nieuwste prijzen te zien.</p>`;
+const placeholder = `<aside class="ph" id="vergelijker"><b>Hier komt later een energievergelijker</b><span class="small">Placeholder voor een toekomstige vergelijkingswidget (Daisycon). Er staat nu niets en we hebben op dit moment geen affiliate-afspraken met energieleveranciers of vergelijkers. <a href="${BASE}/privacy/">Lees de disclosure</a>.</span></aside>`;
+// bol.com partner search links (affiliate, disclosed on /privacy/). Only on the dashboard and the guide pages.
+const bol = (query, name) => `https://partner.bol.com/click/click?t=url&s=1550553&url=${encodeURIComponent('https://www.bol.com/nl/nl/s/?searchtext=' + encodeURIComponent(query))}&f=txl&name=${name}`;
+const meet = `<aside class="sec meet" aria-labelledby="meet-h"><h2 id="meet-h">Handig om je stroomverbruik te meten</h2><p>Zie wat je verbruikt, zodat je het naar de goedkope uren kunt verschuiven.</p><ul class="links">${[['HomeWizard P1-meter', 'homewizard p1 meter', 'homewizard-p1-meter'], ['Slimme stekker met energiemeter', 'slimme stekker energiemeter', 'slimme-stekker-energiemeter'], ['Energiemonitor', 'energiemonitor', 'energiemonitor']].map(([t, q, n]) => `<li><a href="${esc(bol(q, n))}" rel="sponsored nofollow noopener" target="_blank">${t} bekijken bij bol</a></li>`).join('')}</ul><p class="aff"><a href="${BASE}/privacy/">Affiliatelinks: wij krijgen een kleine commissie, jij betaalt niets extra</a></p></aside>`;
+const updated = `<p class="updated">Bron: EnergyZero (day-ahead EPEX Spot). Kale marktprijzen excl. btw; de schatting all-in is een benadering. Bijgewerkt ${esc(fetchedNl)}${data.status !== 'ok' ? ' (let op: laatste ophaalpoging mislukt, dit zijn de laatst bekende prijzen)' : ''}.</p>`;
+const dataTag = `<script type="application/json" id="sp-data">${JSON.stringify(D).replace(/</g, '\\u003c')}</script>`;
 
 // ---------- layout ----------
 const NAV = [['/', 'Dashboard'], ['/stroomprijs-vandaag/', 'Vandaag'], ['/stroomprijs-morgen/', 'Morgen'], ['/gasprijs-vandaag/', 'Gas'], ['/dynamisch-vs-vast-contract/', 'Dynamisch vs vast'], ['/gidsen/', 'Gidsen'], ['/veelgestelde-vragen/', 'FAQ']];
 const LOGO = logo();
-// Tokens: paper/surface/ink for structure, one teal for "cheap" and links, volt yellow only in the brand and the main action,
-// a teal-to-orange diverging scale (grey midpoint) for price levels. Dark mode gets its own steps, not an inversion.
-const CSS = `
-:root{--paper:#f3f5f6;--surface:#fff;--ink:#0f2230;--ink-2:#4a5c6a;--line:#e1e7ea;--line-2:#c3ced5;--brand:#0a7563;--bar:#7c8f9d;--cheap:#0a7563;--now:#0f2230;--neg:#2f5fc4;--hover:rgba(15,34,48,.06);--band:rgba(10,117,99,.07);--hero:#0f2230;--volt:#ffd23f;
---l0:#1fb595;--l1:#8fd3c1;--l2:#8796a3;--l3:#f4b585;--l4:#f0843a;
---display:"Avenir Next",Avenir,"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;--text:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;color-scheme:light dark}
-@media(prefers-color-scheme:dark){:root{--paper:#0a1621;--surface:#102131;--ink:#e8eef2;--ink-2:#9db0be;--line:#1f3546;--line-2:#36536a;--brand:#3cc4a6;--bar:#5f7889;--cheap:#3cc4a6;--now:#f4f7f9;--neg:#86a8f2;--hover:rgba(255,255,255,.07);--band:rgba(60,196,166,.09);--hero:#15293b}}
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
-body{margin:0;font:1rem/1.6 var(--text);background:var(--paper);color:var(--ink);-webkit-font-smoothing:antialiased}
-a{color:var(--brand);text-underline-offset:.18em;text-decoration-thickness:1px}
-a:hover{text-decoration-thickness:2px}
-:focus-visible{outline:3px solid var(--brand);outline-offset:3px;border-radius:4px}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-.skip{position:absolute;left:1rem;top:-3rem;background:var(--ink);color:var(--paper);padding:.5rem .8rem;border-radius:8px;z-index:9}
-.skip:focus{top:.6rem}
-.in{max-width:68rem;margin:0 auto;padding:0 1rem}
-@media(min-width:640px){.in{padding:0 1.5rem}}
-h1,h2,h3{font-family:var(--display);line-height:1.15;letter-spacing:-.015em;text-wrap:balance}
-h1{font-size:clamp(2rem,1.4rem + 3vw,3rem);font-weight:700;margin:0}
-h2{font-size:1.375rem;font-weight:650;margin:2.25rem 0 .75rem}
-p{margin:.75rem 0}
-.top{border-bottom:1px solid var(--line);background:var(--paper)}
-.top .in{display:flex;flex-wrap:wrap;align-items:center;gap:.25rem 1.5rem;padding-top:.75rem;padding-bottom:.5rem}
-.brand{display:inline-flex;color:var(--ink);padding:.25rem 0}
-.logo{height:2rem;width:auto;display:block}
-.top nav{display:flex;gap:.25rem;overflow-x:auto;scrollbar-width:none;margin:0 -1rem;padding:0 1rem .25rem;width:calc(100% + 2rem)}
-.top nav::-webkit-scrollbar{display:none}
-.top nav a{color:var(--ink-2);text-decoration:none;font-size:.9375rem;padding:.45rem .7rem;border-radius:999px;white-space:nowrap}
-.top nav a:hover{color:var(--ink);background:var(--hover)}
-.top nav a[aria-current]{color:var(--ink);background:var(--surface);box-shadow:inset 0 0 0 1px var(--line-2);font-weight:600}
-@media(min-width:880px){.top nav{width:auto;margin:0 0 0 auto;padding:0}}
-main{padding-top:1.25rem;padding-bottom:3rem}
-.hero{background:var(--hero);color:#fff;border-radius:1.75rem;padding:1.5rem 1.25rem 1.25rem;margin:0 -.5rem}
-@media(min-width:640px){.hero{padding:2rem 2rem 1.5rem;margin:0}}
-.hero-top{display:grid;gap:.5rem 2rem;align-items:end}
-@media(min-width:880px){.hero-top{grid-template-columns:auto 1fr}}
-.hero h1{font-size:1.0625rem;font-weight:600;letter-spacing:0;color:#cfdbe4;font-family:var(--text)}
-.hero h1 span{font-variant-numeric:tabular-nums}
-.price{font-family:var(--display);font-weight:700;font-size:clamp(4.25rem,3rem + 9vw,7rem);line-height:.95;letter-spacing:-.045em;margin:.35rem 0 .5rem;display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}
-.price .u{font-size:1.125rem;letter-spacing:0;font-weight:600;color:#b7c6d2}
-.hero-sub{color:#b7c6d2;margin:0;font-size:.9375rem}
-.hero-say{margin:0;font-size:1.0625rem;line-height:1.5;color:#e9f0f4;max-width:34rem}
-@media(min-width:880px){.hero-say{justify-self:end;padding-bottom:.4rem}}
-.db{margin:1.75rem 0 .5rem;display:grid;gap:.6rem}
-.db-row{display:grid;grid-template-columns:minmax(0,1fr);gap:.3rem;align-items:center}
-@media(min-width:640px){.db-row{grid-template-columns:5rem minmax(0,1fr);gap:1rem}}
-.db-l{font-size:.875rem;font-weight:600;color:#cfdbe4}
-.db-g{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));grid-template-rows:.6rem 2.25rem auto;column-gap:2px}
-.db-g i{grid-row:2;border-radius:3px;background:var(--l2)}
-.db-g i:first-of-type{border-radius:8px 3px 3px 8px}.db-g i:last-of-type{border-radius:3px 8px 8px 3px}
-.db-g .l0{background:var(--l0)}.db-g .l1{background:var(--l1)}.db-g .l3{background:var(--l3)}.db-g .l4{background:var(--l4)}
-.db-g i.now{box-shadow:0 0 0 2px var(--hero),0 0 0 4px #fff;z-index:1}
-.db-cb{grid-row:1;border:2px solid var(--volt);border-bottom:0;border-radius:4px 4px 0 0;margin:0 1px .2rem}
-.db-nu{grid-row:3;font-size:.75rem;font-weight:700;text-align:center;margin-top:.2rem;white-space:nowrap;justify-self:center}
-.db-empty{margin:0;font-size:.875rem;color:#b7c6d2;border:1px dashed rgba(255,255,255,.25);border-radius:10px;padding:.55rem .8rem}
-.db-x{display:grid;grid-template-columns:repeat(4,1fr);font-size:.75rem;color:#9fb1bf;font-variant-numeric:tabular-nums}
-.db-lg{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;font-size:.8125rem;color:#b7c6d2;margin:.75rem 0 0}
-@media(min-width:640px){.db-lg{padding-left:6rem}}
-.db-sc{display:inline-flex;align-items:center;gap:3px}
-.db-sc i{width:.9rem;height:.75rem;border-radius:2px;display:inline-block}
-.db-sc i:first-child{margin-left:.35rem}.db-sc i:last-child{margin-right:.35rem}
-.db-sc .l0{background:var(--l0)}.db-sc .l1{background:var(--l1)}.db-sc .l2{background:var(--l2)}.db-sc .l3{background:var(--l3)}.db-sc .l4{background:var(--l4)}
-.db-k{display:inline-flex;align-items:center;gap:.45rem}
-.db-k:before{content:"";width:1.6rem;height:.45rem;border:2px solid var(--volt);border-bottom:0;border-radius:3px 3px 0 0}
-.btns{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1.5rem}
-.btn{display:inline-flex;align-items:center;gap:.5rem;min-height:2.75rem;padding:.55rem 1.05rem;border-radius:.75rem;font-weight:650;text-decoration:none;background:var(--volt);color:#0f2230}
-.btn svg{width:1.15rem;height:1.15rem;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.btn.alt{background:transparent;color:#fff;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.3)}
-.btn.alt:hover{box-shadow:inset 0 0 0 1.5px #fff}
-.btn:hover{text-decoration:none;filter:brightness(1.05)}
-.sec{background:var(--surface);border:1px solid var(--line);border-radius:1.25rem;padding:1.25rem 1rem;margin:1.25rem -.5rem 0}
-@media(min-width:640px){.sec{padding:1.75rem 2rem;margin:1.5rem 0 0}}
-.sec-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25rem 1rem;margin-bottom:.5rem}
-.sec-h h2{margin:0}
-.sec-h p{margin:0;color:var(--ink-2);font-size:.9375rem}
-.sec-h a{margin-left:auto;font-size:.9375rem;font-weight:600}
-.pg-h{margin:1rem 0 1.25rem}
-.pg-h p{color:var(--ink-2);margin:.4rem 0 0;font-size:1.0625rem}
-.chart{margin:.5rem 0 0}
-.ro{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 .6rem;margin:0 0 .75rem;min-height:3.4rem;font-variant-numeric:tabular-nums}
-.ro-t{flex-basis:100%;font-size:.875rem;color:var(--ink-2)}
-.ro-v{font-family:var(--display);font-size:1.75rem;font-weight:700;letter-spacing:-.02em}
-.ro-i{font-size:.875rem;color:var(--ink-2)}
-.plot{display:grid;grid-template-columns:2.25rem minmax(0,1fr);grid-template-rows:auto 1.5rem clamp(10.5rem,40vw,15.5rem) auto;touch-action:pan-y;border-radius:.5rem;cursor:crosshair}
-.plot:focus-visible{outline-offset:6px}
-.yt{grid-row:1;grid-column:1/-1;font-size:.75rem;color:var(--ink-2)}
-.mk{grid-row:2;grid-column:2;display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));align-items:end;font-size:.75rem;line-height:1}
-.mk-cb{grid-row:1;border:2px solid var(--cheap);border-bottom:0;border-radius:4px 4px 0 0;height:.45rem;margin:0 2px .25rem;position:relative}
-.mk-cb em{position:absolute;bottom:.55rem;left:50%;transform:translateX(-50%);font-style:normal;font-weight:600;color:var(--ink-2);white-space:nowrap}
-.mk-cb.q em{display:none}
-.mk-nu{grid-row:1;justify-self:center;align-self:end;background:var(--now);color:var(--surface);font-weight:700;padding:.18rem .35rem;border-radius:4px;margin-bottom:.2rem;position:relative;z-index:1}
-.area{grid-row:3;grid-column:1/-1;position:relative}
-.gl{position:absolute;left:2.25rem;right:0;border-top:1px solid var(--line);height:0}
-.gl.z{border-top-color:var(--line-2)}
-.gl em{position:absolute;right:calc(100% + .45rem);top:0;transform:translateY(-50%);font-style:normal;font-size:.75rem;color:var(--ink-2);font-variant-numeric:tabular-nums}
-.bars{position:absolute;inset:0 0 0 2.25rem;display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr))}
-.col{position:relative;border-radius:4px}
-.col i{position:absolute;left:50%;width:min(72%,1.5rem);margin-left:max(-36%,-.75rem);min-height:2px;background:var(--bar);border-radius:4px 4px 0 0;transform-origin:bottom;animation:grow .7s cubic-bezier(.2,.7,.2,1) both;animation-delay:calc(var(--i) * 18ms)}
-.col.neg i{background:var(--neg);border-radius:0 0 4px 4px;transform-origin:top}
-.col.cheap i{background:var(--cheap)}
-.col.now i{background:var(--now)}
-.col.sel{background:var(--hover)}
-.avg{position:absolute;left:2.25rem;right:0;border-top:1.5px solid var(--ink);opacity:.55;pointer-events:none}
-@keyframes grow{from{transform:scaleY(0)}}
-@media(prefers-reduced-motion:reduce){.col i{animation:none}}
-.xa{grid-row:4;grid-column:2;display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));font-size:.75rem;color:var(--ink-2);text-align:center;padding-top:.4rem;font-variant-numeric:tabular-nums}
-@media(max-width:639px){.xa span:not(.k){visibility:hidden}}
-.lg{display:flex;flex-wrap:wrap;gap:.35rem 1.1rem;font-size:.8125rem;color:var(--ink-2);margin-top:.85rem}
-.lg span{display:inline-flex;align-items:center;gap:.4rem}
-.sw{width:.8rem;height:.8rem;border-radius:3px;display:inline-block}
-.sw.cheap{background:var(--cheap)}.sw.now{background:var(--now)}.sw.bar{background:var(--bar)}.sw.neg{background:var(--neg)}
-.sw.avgk{height:0;border-top:1.5px solid var(--ink);opacity:.55;border-radius:0;width:1.1rem}
-.lg-u{flex-basis:100%}
-@media(min-width:880px){.lg-u{flex-basis:auto;margin-left:auto}}
-.empty{border:1px dashed var(--line-2);border-radius:.75rem;padding:1rem;color:var(--ink-2);margin:.5rem 0 0}
-.stats{display:grid;grid-template-columns:repeat(2,1fr);margin:1.5rem 0 0;border-top:1px solid var(--line)}
-@media(min-width:880px){.stats{grid-template-columns:repeat(4,1fr)}}
-.stats div{padding:.85rem 0 .85rem .9rem;border-bottom:1px solid var(--line);border-left:1px solid var(--line)}
-.stats div:nth-child(odd){border-left:0;padding-left:0}
-@media(min-width:880px){.stats div{border-bottom:0}.stats div:nth-child(odd){border-left:1px solid var(--line);padding-left:.9rem}.stats div:first-child{border-left:0;padding-left:0}}
-.stats dt{font-size:.8125rem;color:var(--ink-2)}
-.stats dd{margin:0;font-family:var(--display);font-size:1.375rem;font-weight:700;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
-.stats dd.s{font-family:var(--text);font-size:.8125rem;font-weight:400;color:var(--ink-2);letter-spacing:0}
-.stats .hl dd:not(.s){color:var(--cheap)}
-.tips{list-style:none;padding:0;margin:1.5rem 0 0;display:grid;gap:.75rem}
-.sec>.tips:first-child{margin-top:0}
-@media(min-width:640px){.tips{grid-template-columns:repeat(3,1fr)}}
-.tips li{display:flex;gap:.8rem;align-items:flex-start;background:var(--band);border-radius:1rem;padding:.9rem 1rem}
-.ti{flex:none;width:2.4rem;height:2.4rem;border-radius:.7rem;background:var(--surface);display:grid;place-items:center;color:var(--cheap);box-shadow:inset 0 0 0 1px var(--line)}
-.ti svg{width:1.4rem;height:1.4rem;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
-.tips b{display:block;font-size:.875rem;font-weight:600;color:var(--ink-2)}
-.tr{display:block;font-family:var(--display);font-size:1.3rem;font-weight:700;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
-.td{display:block;font-size:.8125rem;color:var(--ink-2)}
-.note{font-size:.8125rem;color:var(--ink-2);margin:.85rem 0 0;max-width:46rem}
-.tbl{margin-top:1.25rem;border-top:1px solid var(--line);padding-top:.75rem}
-.tbl summary{cursor:pointer;font-weight:600;color:var(--brand);padding:.35rem 0;min-height:2.75rem;display:flex;align-items:center;gap:.7rem;list-style:none}
-.tbl summary::-webkit-details-marker{display:none}
-.tbl summary:before{content:"";width:.5rem;height:.5rem;border:solid currentColor;border-width:0 2px 2px 0;transform:rotate(-45deg);transition:transform .15s}
-.tbl[open] summary:before{transform:rotate(45deg)}
-.tbl-w{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:.9375rem;font-variant-numeric:tabular-nums}
-th,td{padding:.55rem .6rem;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-th{font-size:.8125rem;font-weight:600;color:var(--ink-2)}
-tbody tr:hover td{background:var(--hover)}
-.ph{border:2px dashed var(--line-2);border-radius:1.25rem;padding:1.25rem;margin:1.5rem 0 0;color:var(--ink-2);display:grid;gap:.3rem;text-align:left}
-.ph b{color:var(--ink);font-family:var(--display);font-size:1.0625rem}
-.ph .small{font-size:.875rem}
-.meet h2{margin:0 0 .25rem;font-size:1.0625rem}
-.meet p{margin:0;color:var(--ink-2);font-size:.9375rem}
-.meet .links{margin-top:.5rem}
-.meet .aff{margin-top:.5rem;font-size:.8125rem}
-.duo{display:grid;gap:1.25rem;margin-top:1.5rem}
-@media(min-width:880px){.duo{grid-template-columns:1fr 1fr}}
-.duo .sec{margin-top:0}
-.duo h2{margin-top:0}
-.fig{font-family:var(--display);font-size:clamp(2.5rem,2rem + 3vw,3.5rem);font-weight:700;letter-spacing:-.03em;line-height:1;margin:.25rem 0 .5rem}
-.fig small{font-size:1rem;font-weight:600;letter-spacing:0;color:var(--ink-2);margin-left:.4rem}
-.links{list-style:none;padding:0;margin:0}
-.links li{border-top:1px solid var(--line)}
-.links li:first-child{border-top:0}
-.links a{display:block;padding:.7rem 0;font-weight:600;text-decoration:none}
-.links a:hover{text-decoration:underline}
-.updated{font-size:.8125rem;color:var(--ink-2);margin:1.5rem 0 0}
-.prose{max-width:42rem}
-.prose p,.prose li{font-size:1.0625rem}
-.prose ul{padding-left:1.2rem}
-.prose li{margin:.35rem 0}
-.prose ol{padding-left:1.4rem}
-.prose h3{font-size:1.125rem;font-weight:650;margin:1.75rem 0 .5rem}
-.prose blockquote{margin:1.25rem 0;padding:.1rem 0 .1rem 1rem;border-left:3px solid var(--brand);color:var(--ink-2)}
-.prose code{font:.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--hover);padding:.1em .35em;border-radius:4px}
-.prose pre{background:var(--surface);border:1px solid var(--line);border-radius:.75rem;padding:.9rem 1rem;overflow-x:auto}
-.prose pre code{background:none;padding:0;font-size:.875rem}
-.prose hr{border:0;border-top:1px solid var(--line);margin:2rem 0}
-.prose .ai-note{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.875rem;color:var(--ink-2)}
-.crumb{margin:0 0 .4rem;font-size:.9375rem}
-.sec.gi{margin-bottom:2.5rem}
-.guides{list-style:none;padding:0;margin:0;display:grid;gap:1rem}
-.guides li{border-top:1px solid var(--line);padding-top:1rem}
-.guides li:first-child{border-top:0;padding-top:0}
-.guides h2{margin:0;font-size:1.25rem}
-.guides h2 a{text-decoration:none}
-.guides h2 a:hover{text-decoration:underline}
-.guides p{margin:.35rem 0 0;color:var(--ink)}
-.guides time{font-size:.8125rem;color:var(--ink-2)}
-.cmp th[scope=row]{color:var(--ink);font-size:.9375rem}
-.cmp thead th{font-family:var(--display);font-size:1rem;color:var(--ink)}
-@media(max-width:639px){.cmp thead{display:none}.cmp tr{display:grid;grid-template-columns:1fr 1fr;gap:0 1rem;border-bottom:1px solid var(--line);padding:.6rem 0}.cmp tr:last-child{border-bottom:0}.cmp th,.cmp td{border:0;padding:.2rem 0}.cmp th[scope=row]{grid-column:1/-1;font-family:var(--display);font-size:1rem}.cmp td:before{content:attr(data-l);display:block;font-size:.75rem;font-weight:600;color:var(--ink-2)}}
-.faq{max-width:46rem;margin-top:1rem}
-.qa{border-top:1px solid var(--line);padding:1.25rem 0 .5rem}
-.qa h2{margin:0;font-size:1.25rem}
-.qa p{color:var(--ink);margin:.5rem 0 0}
-.foot{border-top:1px solid var(--line);padding:2rem 0 2.5rem;font-size:.875rem;color:var(--ink-2)}
-.foot .in{display:grid;gap:.25rem}
-.foot .logo{height:1.6rem;margin-bottom:.5rem;color:var(--ink)}
-.foot p{margin:.35rem 0;max-width:46rem}
-.foot a{color:var(--ink-2)}
-.foot a:hover{color:var(--ink)}
-@media(forced-colors:active){.col i,.db-g i,.sw{forced-color-adjust:none}}
-@media print{.top nav,.btns,.ph,.skip{display:none}.hero{color:#000;background:none;border:1px solid #999}}
-`.replace(/\s*\n\s*/g, '');
-
-// Client script: interactive chart readout + moves the "nu" markers if the page is served in a later hour than it was built.
-const JS = `(()=>{const p=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Amsterdam',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',hourCycle:'h23'}).formatToParts(new Date()).map(x=>[x.type,x.value])),day=p.year+'-'+p.month+'-'+p.day,hr=+p.hour;
-document.querySelectorAll('.db-g').forEach(g=>{if(g.dataset.day!==day)return;const c=[...g.querySelectorAll('i')],k=c.findIndex(i=>+i.dataset.h===hr),pin=g.querySelector('.db-nu');if(k<0||c[k].classList.contains('now')||!pin)return;c.forEach(i=>i.classList.toggle('now',i===c[k]));pin.style.gridColumn=k+1});
-document.querySelectorAll('.plot').forEach(pl=>{const cols=[...pl.querySelectorAll('.col')],ro=pl.parentElement.querySelector('.ro'),[rt,rv,ri]=ro.children,pin=pl.querySelector('.mk-nu');let def=+pl.dataset.sel,cur=def;
-if(pl.dataset.day===day&&pin){const k=cols.findIndex(c=>+c.dataset.h===hr);if(k>=0&&!cols[k].classList.contains('now')){cols.forEach(c=>c.classList.toggle('now',c===cols[k]));pin.style.gridColumn=k+1;def=cur=k;const d=cols[k].dataset,set=(id,t)=>{const e=document.getElementById(id);if(e)e.textContent=t};set('nu-h',d.l);set('nu-v',d.n);set('nu-i',d.i+' ct')}}
-const show=(k,mark)=>{const c=cols[k],d=c.dataset;cols.forEach(x=>x.classList.toggle('sel',mark&&x===c));rt.textContent=(c.classList.contains('now')?'Nu, ':k===def?'Laagste uur, ':'')+d.l;rv.textContent=d.n+' ct';ri.textContent='per kWh excl. btw, '+d.i+' ct incl. btw'};
-const at=e=>{const r=pl.querySelector('.bars').getBoundingClientRect();return Math.max(0,Math.min(cols.length-1,Math.floor((e.clientX-r.left)/r.width*cols.length)))};
-show(def,false);
-pl.addEventListener('pointermove',e=>show(cur=at(e),true));pl.addEventListener('pointerdown',e=>show(cur=at(e),true));
-pl.addEventListener('pointerleave',e=>{if(e.pointerType!=='touch'&&document.activeElement!==pl)show(cur=def,false)});
-pl.addEventListener('focus',()=>show(cur,true));pl.addEventListener('blur',()=>show(cur=def,false));
-pl.addEventListener('keydown',e=>{const m={ArrowRight:1,ArrowLeft:-1,ArrowUp:1,ArrowDown:-1}[e.key];if(m)cur=Math.max(0,Math.min(cols.length-1,cur+m));else if(e.key==='Home')cur=0;else if(e.key==='End')cur=cols.length-1;else return;e.preventDefault();show(cur,true)})})})()`.replace(/\n/g, '');
-
-const CAL = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>';
-const RSS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/><circle cx="6" cy="18" r="1.2"/></svg>';
 const GOATCOUNTER = '<script data-goatcounter="https://stroomprijs.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>';
+// Before first paint: stored theme (no flash) and the "js" class that reveals the interactive controls.
+const HEAD_JS = `<script>(function(d){try{var t=localStorage.getItem('sp-theme');if(t==='light'||t==='dark')d.dataset.theme=t}catch(e){}d.classList.add('js')})(document.documentElement)</script>`;
+const THEME_JS = `(()=>{const b=document.getElementById('theme');if(!b)return;const T=['auto','light','dark'],L={auto:'Automatisch',light:'Licht',dark:'Donker'},h=document.documentElement;
+const set=t=>{if(t==='auto')delete h.dataset.theme;else h.dataset.theme=t;b.dataset.t=t;b.querySelector('.tt-l').textContent=L[t];b.setAttribute('aria-label','Kleurenschema: '+L[t].toLowerCase()+'. Klik om te wisselen.')};
+let t='auto';try{t=localStorage.getItem('sp-theme')||'auto'}catch(e){}set(T.includes(t)?t:'auto');
+b.addEventListener('click',()=>{const n=T[(T.indexOf(b.dataset.t)+1)%3];try{localStorage.setItem('sp-theme',n)}catch(e){}set(n)})})();`.replace(/\n/g, '');
+const APP_JS = `(()=>{const R=(${makeRender.toString()})();\n${fs.readFileSync('lib/app.js', 'utf8')}\n})();`;
+const THEME_BTN = `<button class="tt js-only" id="theme" type="button" data-t="auto" aria-label="Kleurenschema: automatisch. Klik om te wisselen."><svg class="i-a" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg><svg class="i-l" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></svg><svg class="i-d" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg><span class="tt-l">Automatisch</span></button>`;
 const jsonLd = o => JSON.stringify(o).replace(/</g, '\\u003c'); // no "</script>" from content inside the JSON-LD block
-function page(p, { title, desc, body, schema, type = 'website', modified }) {
+const ORG = { '@type': 'Organization', '@id': SITE + '/#org', name: 'CerberosTech', url: 'https://github.com/CerberosTech' };
+const crumbs = (...items) => ({ '@type': 'BreadcrumbList', itemListElement: [['Stroomprijs', '/'], ...items].map(([name, p], i) => ({ '@type': 'ListItem', position: i + 1, name, item: SITE + p })) });
+const graph = (...nodes) => ({ '@context': 'https://schema.org', '@graph': nodes });
+
+function page(p, { title, desc, body, schema, type = 'website', modified, app = false }) {
   const url = SITE + p;
   const nav = NAV.map(([h, t]) => `<a href="${BASE}${h}"${h === p || (h !== '/' && p.startsWith(h)) ? ' aria-current="page"' : ''}>${t}</a>`).join('');
-  const js = /class="(plot|db-g)/.test(body) ? `<script>${JS}</script>` : '';
-  const html = `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><meta name="description" content="${esc(desc)}"><link rel="canonical" href="${url}"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#f3f5f6" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0a1621" media="(prefers-color-scheme: dark)"><link rel="icon" href="${BASE}/icon.svg" type="image/svg+xml"><link rel="icon" href="${BASE}/favicon.png" sizes="64x64" type="image/png"><link rel="apple-touch-icon" href="${BASE}/apple-touch-icon.png"><link rel="manifest" href="${BASE}/site.webmanifest"><meta property="og:type" content="${type}">${modified ? `<meta property="article:modified_time" content="${modified}">` : ''}<meta property="og:locale" content="nl_NL"><meta property="og:site_name" content="Stroomprijs"><meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(desc)}"><meta property="og:url" content="${url}"><meta property="og:image" content="${SITE}/og.png"><meta property="og:image:type" content="image/png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Stroomprijs: dynamische stroomprijs per uur, vandaag en morgen, met de goedkoopste uren"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${esc(title)}"><meta name="twitter:description" content="${esc(desc)}"><meta name="twitter:image" content="${SITE}/og.png"><link rel="alternate" type="application/rss+xml" title="Goedkoopste uren morgen" href="${SITE}/feed.xml">${schema ? `<script type="application/ld+json">${jsonLd(schema)}</script>` : ''}${GOATCOUNTER}<style>${CSS}</style></head><body><a class="skip" href="#main">Naar de inhoud</a><header class="top"><div class="in"><a class="brand" href="${BASE}/">${LOGO}</a><nav aria-label="Hoofdmenu">${nav}</nav></div></header><main id="main" class="in">${body}</main><footer class="foot"><div class="in">${LOGO}<p>Bron: day-ahead prijzen (EPEX Spot, gepubliceerd via <a href="https://transparency.entsoe.eu/">ENTSO-E</a>) opgehaald via de publieke <a href="https://www.energyzero.nl/">EnergyZero</a>-API. Laatst bijgewerkt: ${esc(fetchedNl)}. Wordt elk uur ververst. Geen advies; controleer de tarieven van je eigen leverancier.</p><p><a href="${BASE}/privacy/">Privacy &amp; disclosure</a> · <a href="${BASE}/feed.xml">RSS</a> · <a href="${BASE}/goedkoopste-uren.ics">Agenda (.ics)</a> · <a href="https://github.com/CerberosTech/stroomprijs">Broncode</a></p><p>Meer gratis tools: <a href="https://cerberostech.github.io/isde-checker/">ISDE-subsidiechecker warmtepompen</a> · <a href="https://cerberostech.github.io/deadorsupported/">Dead or Supported</a></p></div></footer>${js}</body></html>`;
+  const html = `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><meta name="description" content="${esc(desc)}"><link rel="canonical" href="${url}"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#f2f4f3" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0b1520" media="(prefers-color-scheme: dark)">${HEAD_JS}<link rel="icon" href="${BASE}/icon.svg" type="image/svg+xml"><link rel="icon" href="${BASE}/favicon.png" sizes="64x64" type="image/png"><link rel="apple-touch-icon" href="${BASE}/apple-touch-icon.png"><link rel="manifest" href="${BASE}/site.webmanifest"><meta property="og:type" content="${type}">${modified ? `<meta property="article:modified_time" content="${modified}">` : ''}<meta property="og:locale" content="nl_NL"><meta property="og:site_name" content="Stroomprijs"><meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(desc)}"><meta property="og:url" content="${url}"><meta property="og:image" content="${SITE}/og.png"><meta property="og:image:type" content="image/png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Stroomprijs: dynamische stroomprijs per uur, vandaag en morgen, met de goedkoopste uren"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${esc(title)}"><meta name="twitter:description" content="${esc(desc)}"><meta name="twitter:image" content="${SITE}/og.png"><link rel="alternate" type="application/rss+xml" title="Goedkoopste uren morgen" href="${SITE}/feed.xml">${schema ? `<script type="application/ld+json">${jsonLd(schema)}</script>` : ''}${GOATCOUNTER}<style>${CSS}</style></head><body><a class="skip" href="#main">Naar de inhoud</a><header class="top"><div class="in"><a class="brand" href="${BASE}/" aria-label="Stroomprijs, naar het dashboard">${LOGO}</a><nav aria-label="Hoofdmenu">${nav}</nav>${THEME_BTN}</div></header><main id="main" class="in">${body}</main><footer class="foot"><div class="in">${LOGO}<p>Bron: day-ahead prijzen (EPEX Spot, gepubliceerd via <a href="https://transparency.entsoe.eu/">ENTSO-E</a>) opgehaald via de publieke <a href="https://www.energyzero.nl/">EnergyZero</a>-API. Laatst bijgewerkt: ${esc(fetchedNl)}. Wordt elk uur ververst. Geen advies; controleer de tarieven van je eigen leverancier.</p><p><a href="${BASE}/zo-rekenen-we/">Zo rekenen we</a> · <a href="${BASE}/privacy/">Privacy &amp; disclosure</a> · <a href="${BASE}/feed.xml">RSS</a> · <a href="${BASE}/goedkoopste-uren.ics">Agenda (.ics)</a> · <a href="${BASE}/prices.json">Data (JSON)</a> · <a href="https://github.com/CerberosTech/stroomprijs">Broncode</a></p><p>Meer gratis tools: <a href="https://cerberostech.github.io/isde-checker/">ISDE-subsidiechecker warmtepompen</a> · <a href="https://cerberostech.github.io/deadorsupported/">Dead or Supported</a></p></div></footer>${app ? dataTag : ''}<script>${THEME_JS}</script>${app ? `<script>${APP_JS}</script>` : ''}</body></html>`;
   const f = path.join(OUT, p, p.endsWith('/') ? 'index.html' : ''); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, html);
 }
 
 fs.rmSync(OUT, { recursive: true, force: true }); fs.mkdirSync(OUT, { recursive: true });
 for (const f of fs.readdirSync('static')) fs.copyFileSync(path.join('static', f), path.join(OUT, f));
 const assets = writeAssets(fs, path, OUT); // logo mark, favicons, og.png/og.svg: rendered from code, no binary files in the repo
-fs.writeFileSync(path.join(OUT, 'site.webmanifest'), JSON.stringify({ name: 'Stroomprijs', short_name: 'Stroomprijs', description: 'Dynamische stroomprijs per uur, vandaag en morgen.', lang: 'nl', start_url: `${BASE}/`, scope: `${BASE}/`, display: 'standalone', background_color: '#f3f5f6', theme_color: '#0f2230', icons: [{ src: `${BASE}/icon-192.png`, sizes: '192x192', type: 'image/png', purpose: 'any maskable' }, { src: `${BASE}/icon-512.png`, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }, { src: `${BASE}/icon.svg`, sizes: 'any', type: 'image/svg+xml' }] }));
+fs.writeFileSync(path.join(OUT, 'site.webmanifest'), JSON.stringify({ name: 'Stroomprijs', short_name: 'Stroomprijs', description: 'Dynamische stroomprijs per uur, vandaag en morgen.', lang: 'nl', start_url: `${BASE}/`, scope: `${BASE}/`, display: 'standalone', background_color: '#f2f4f3', theme_color: '#0f2230', icons: [{ src: `${BASE}/icon-192.png`, sizes: '192x192', type: 'image/png', purpose: 'any maskable' }, { src: `${BASE}/icon-512.png`, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }, { src: `${BASE}/icon.svg`, sizes: 'any', type: 'image/svg+xml' }] }));
 console.log('brand assets:', assets.join(', '));
 
-const nowH = hourOf(now); const cur = P.today.find(x => x.h === nowH);
-const placeholder = `<aside class="ph" id="vergelijker"><b>Hier komt later een energievergelijker</b><span class="small">Placeholder voor een toekomstige vergelijkingswidget (Daisycon). Er staat nu niets en we hebben op dit moment geen affiliate-afspraken met energieleveranciers of vergelijkers. <a href="${BASE}/privacy/">Lees de disclosure</a>.</span></aside>`;
-// bol.com partner search links (affiliate, disclosed on /privacy/). Only on the dashboard and the guide pages.
-const bol = (query, name) => `https://partner.bol.com/click/click?t=url&s=1550553&url=${encodeURIComponent('https://www.bol.com/nl/nl/s/?searchtext=' + encodeURIComponent(query))}&f=txl&name=${name}`;
-const meet = `<aside class="sec meet" aria-labelledby="meet-h"><h2 id="meet-h">Handig om je stroomverbruik te meten</h2><p>Zie wat je verbruikt, zodat je het naar de goedkope uren kunt verschuiven.</p><ul class="links">${[['HomeWizard P1-meter', 'homewizard p1 meter', 'homewizard-p1-meter'], ['Slimme stekker met energiemeter', 'slimme stekker energiemeter', 'slimme-stekker-energiemeter'], ['Energiemonitor', 'energiemonitor', 'energiemonitor']].map(([t, q, n]) => `<li><a href="${esc(bol(q, n))}" rel="sponsored nofollow noopener" target="_blank">${t} bekijken bij bol</a></li>`).join('')}</ul><p class="aff"><a href="${BASE}/privacy/">Affiliatelinks: wij krijgen een kleine commissie, jij betaalt niets extra</a></p></aside>`;
-const updated = `<p class="updated">Prijzen excl. btw, energiebelasting en leveranciersopslag. Bijgewerkt ${esc(fetchedNl)}${data.status !== 'ok' ? ' (let op: laatste ophaalpoging mislukt, dit zijn de laatst bekende prijzen)' : ''}.</p>`;
+// ---------- dashboard ----------
+const btns = `<div class="btns"><a class="btn" href="${BASE}/goedkoopste-uren.ics">${ico('cal')}Goedkoopste uren in je agenda</a><a class="btn alt" href="${BASE}/feed.xml">${ico('rss')}RSS-feed</a></div>`;
+const gasCard = `<section class="sec" aria-labelledby="gas-h"><h2 id="gas-h">Gasprijs nu</h2><div data-c="gas">${R.gas(C)}</div><p class="note"><a href="${BASE}/gasprijs-vandaag/">Meer over de gasprijs</a></p></section>`;
+const dataset = { '@type': 'Dataset', name: 'Dynamische stroom- en gasprijzen Nederland, vandaag en morgen', description: 'Day-ahead uurprijzen voor stroom (EUR per kWh) en dagprijzen voor gas (EUR per m³) in Nederland, excl. btw, voor vandaag en morgen. Bron: EPEX Spot day-ahead via de publieke EnergyZero-API. Elk uur ververst.', url: SITE + '/', inLanguage: 'nl-NL', isAccessibleForFree: true, creator: { '@id': ORG['@id'] }, isBasedOn: 'https://www.energyzero.nl/', temporalCoverage: `${TODAY}/${TOMORROW}`, spatialCoverage: { '@type': 'Place', name: 'Nederland' }, dateModified: data.fetched, distribution: [{ '@type': 'DataDownload', encodingFormat: 'application/json', contentUrl: SITE + '/prices.json' }] };
+page('/', { app: true, title: 'Stroomprijs nu, vandaag en morgen – dynamische energieprijzen per uur', desc: 'De dynamische stroomprijs van nu, per uur voor vandaag en morgen. Met prijsklasse A–G, de goedkoopste uren voor je wasmachine of auto, een kostenberekening en een schatting incl. belasting.', schema: graph({ '@type': 'WebSite', '@id': SITE + '/#site', name: 'Stroomprijs', url: SITE + '/', inLanguage: 'nl-NL', publisher: { '@id': ORG['@id'] } }, ORG, dataset), body: `${stale}${modebar()}
+<section class="hero" data-c="hero" aria-labelledby="nu">${R.hero(C)}</section>${btns}
+${planner('nu')}
+${daySec('sel', 'Prijs per uur')}
+<p class="no-js note">De prijzen van morgen staan op <a href="${BASE}/stroomprijs-morgen/">Stroomprijs morgen</a>.</p>
+<div class="duo">${gasCard}<section class="sec"><h2>Meer weten?</h2><ul class="links"><li><a href="${BASE}/zo-rekenen-we/">Zo schatten we de prijs incl. belasting</a></li><li><a href="${BASE}/dynamisch-vs-vast-contract/">Dynamisch vs vast contract</a></li><li><a href="${BASE}/gidsen/">Gidsen over dynamische prijzen</a></li><li><a href="${BASE}/veelgestelde-vragen/">Veelgestelde vragen</a></li><li><a href="https://cerberostech.github.io/isde-checker/">Subsidie op je warmtepomp checken (ISDE)</a></li></ul></section></div>
+${placeholder}${meet}${updated}` });
 
-// Dashboard
-const tAvg = avg(P.today), tBlock = P.today.length >= 3 ? cheapestBlock(P.today, 3) : null, mBlock = P.tomorrow.length >= 3 ? cheapestBlock(P.tomorrow, 3) : null;
-function verdict() {
-  if (!cur || !tBlock) return '';
-  const blk = `${hh(tBlock.start)}–${hh(tBlock.end)}`, inBlock = tBlock.hours.includes(cur), past = tBlock.hours[tBlock.hours.length - 1].h < nowH;
-  const rel = inBlock ? `Je zit nu in het goedkoopste blok van 3 uur van vandaag (${blk}).` : `Nu ${ct(Math.abs(cur.p - tAvg))} ${cur.p <= tAvg ? 'onder' : 'boven'} het daggemiddelde van ${ct(tAvg)}.`;
-  const next = inBlock ? '' : past ? (mBlock ? ` Het goedkoopste blok van vandaag (${blk}) is voorbij; morgen is dat ${hh(mBlock.start)}–${hh(mBlock.end)}.` : ` Het goedkoopste blok van vandaag (${blk}) is voorbij.`) : ` Het goedkoopste blok van 3 uur is ${blk}.`;
-  return `<p class="hero-say">${rel}${next}</p>`;
-}
-const hero = `<section class="hero" aria-labelledby="nu"><div class="hero-top"><div><h1 id="nu">Stroomprijs nu <span id="nu-h">${span(nowH)}</span></h1>${cur ? `<p class="price"><span id="nu-v">${nf(cur.p * 100)}</span><span class="u">ct/kWh</span></p><p class="hero-sub">Excl. btw. Met 21% btw: <span id="nu-i">${ct(cur.inc)}</span> per kWh.</p>` : '<p class="price">Onbekend</p>'}</div>${verdict()}</div>
-${dagband([['Vandaag', P.today, TODAY, true], ['Morgen', P.tomorrow, TOMORROW, false]], nowH)}
-<div class="btns"><a class="btn" href="${BASE}/goedkoopste-uren.ics">${CAL}Goedkoopste uren in je agenda</a><a class="btn alt" href="${BASE}/feed.xml">${RSS}RSS-feed</a></div></section>`;
-page('/', { title: 'Stroomprijs vandaag en morgen – dynamische energieprijzen per uur', desc: `Actuele dynamische stroomprijs per uur voor vandaag en morgen, het goedkoopste blok van 3 uur en het beste moment om te wassen of je auto te laden.`, schema: { '@context': 'https://schema.org', '@type': 'WebSite', name: 'Stroomprijs', url: SITE + '/', inLanguage: 'nl-NL' }, body: `${hero}
-<section class="sec" aria-labelledby="vandaag"><div class="sec-h"><h2 id="vandaag">Vandaag</h2><p>${nlDate(TODAY)}</p><a href="${BASE}/stroomprijs-vandaag/">Alle uurprijzen van vandaag</a></div>${chart(P.today, 'Stroomprijs per uur vandaag', nowH, TODAY)}${stats(P.today)}${advice(P.today, 'vandaag')}</section>
-<section class="sec" aria-labelledby="morgen"><div class="sec-h"><h2 id="morgen">Morgen</h2><p>${nlDate(TOMORROW)}</p><a href="${BASE}/stroomprijs-morgen/">Alle uurprijzen van morgen</a></div>${chart(P.tomorrow, 'Stroomprijs per uur morgen', -1, TOMORROW)}${stats(P.tomorrow)}${advice(P.tomorrow, 'morgen')}</section>
-${placeholder}
-<div class="duo"><section class="sec"><h2>Gasprijs vandaag</h2>${G.today.length ? `<p class="fig">${eur(avg(G.today), 3)}<small>per m³</small></p><p class="note">Excl. btw (${eur(avg(G.today) * VAT, 3)} incl.). <a href="${BASE}/gasprijs-vandaag/">Details van de gasprijs</a></p>` : '<p>Geen gasprijs beschikbaar.</p>'}</section><section class="sec"><h2>Meer weten?</h2><ul class="links"><li><a href="${BASE}/dynamisch-vs-vast-contract/">Dynamisch vs vast contract</a></li><li><a href="${BASE}/veelgestelde-vragen/">Veelgestelde vragen</a></li><li><a href="https://cerberostech.github.io/isde-checker/">Subsidie op je warmtepomp checken (ISDE)</a></li></ul></section></div>${meet}${updated}` });
+// ---------- vandaag / morgen ----------
+page('/stroomprijs-vandaag/', { app: true, title: `Stroomprijs vandaag (${nlDate(TODAY)}) – prijs per uur`, desc: 'De dynamische stroomprijs van vandaag per uur, met prijsklasse A–G, het goedkoopste en duurste uur, het goedkoopste blok en een schatting incl. belasting.', schema: graph(crumbs(['Stroomprijs vandaag', '/stroomprijs-vandaag/'])), body: `<header class="pg-h"><h1>Stroomprijs vandaag</h1><p>${nlDate(TODAY)}</p></header>${stale}${modebar()}${daySec('today', 'Prijs per uur')}${planner('today')}<div class="prose"><p>De prijzen komen uit de day-ahead veiling van EPEX Spot voor het Nederlandse biedgebied. Die veiling vindt de dag ervoor rond 12:00 uur plaats; de uitslag wordt ook gepubliceerd op het ENTSO-E Transparency Platform. Bekijk ook de <a href="${BASE}/stroomprijs-morgen/">stroomprijs van morgen</a>.</p></div>${placeholder}${updated}` });
+page('/stroomprijs-morgen/', { app: true, title: `Stroomprijs morgen (${nlDate(TOMORROW)}) – prijs per uur`, desc: 'De dynamische stroomprijs van morgen per uur, zodra de day-ahead veiling bekend is (meestal rond 13:00–15:00 uur). Met de goedkoopste uren en een planner.', schema: graph(crumbs(['Stroomprijs morgen', '/stroomprijs-morgen/'])), body: `<header class="pg-h"><h1>Stroomprijs morgen</h1><p>${nlDate(TOMORROW)}</p></header>${modebar()}${daySec('tomorrow', 'Prijs per uur')}${planner('tomorrow')}<div class="prose"><p>Morgen plannen? Abonneer je op de <a href="${BASE}/goedkoopste-uren.ics">agenda met de goedkoopste uren</a> of de <a href="${BASE}/feed.xml">RSS-feed</a>. De prijzen van morgen worden bekend na de day-ahead veiling (rond 12:00 uur); deze site ververst elk uur.</p></div>${placeholder}${updated}` });
 
-// Vandaag / morgen
-page('/stroomprijs-vandaag/', { title: `Stroomprijs vandaag (${nlDate(TODAY)}) – prijs per uur`, desc: 'De dynamische stroomprijs van vandaag per uur, met goedkoopste en duurste uur en het goedkoopste blok van 3 uur.', body: `<header class="pg-h"><h1>Stroomprijs vandaag</h1><p>${nlDate(TODAY)}</p></header><section class="sec">${chart(P.today, 'Stroomprijs per uur vandaag', nowH, TODAY)}${stats(P.today)}${table(P.today)}</section><section class="sec">${advice(P.today, 'vandaag')}</section><div class="prose"><p>De prijzen komen uit de day-ahead veiling van EPEX Spot voor het Nederlandse biedgebied. Die veiling vindt de dag ervoor rond 12:00 uur plaats; de uitslag wordt ook gepubliceerd op het ENTSO-E Transparency Platform. Bekijk ook de <a href="${BASE}/stroomprijs-morgen/">stroomprijs van morgen</a>.</p></div>${placeholder}${updated}` });
-page('/stroomprijs-morgen/', { title: `Stroomprijs morgen (${nlDate(TOMORROW)}) – prijs per uur`, desc: 'De dynamische stroomprijs van morgen per uur, zodra de day-ahead veiling bekend is (meestal rond 13:00–15:00 uur).', body: `<header class="pg-h"><h1>Stroomprijs morgen</h1><p>${nlDate(TOMORROW)}</p></header><section class="sec">${chart(P.tomorrow, 'Stroomprijs per uur morgen', -1, TOMORROW)}${stats(P.tomorrow)}${table(P.tomorrow)}</section>${P.tomorrow.length >= 4 ? `<section class="sec">${advice(P.tomorrow, 'morgen')}</section>` : ''}<div class="prose"><p>Morgen plannen? Abonneer je op de <a href="${BASE}/goedkoopste-uren.ics">agenda met de goedkoopste uren</a> of de <a href="${BASE}/feed.xml">RSS-feed</a>. De prijzen van morgen worden bekend na de day-ahead veiling (rond 12:00 uur); deze site ververst elk uur.</p></div>${placeholder}${updated}` });
+// ---------- gas ----------
+const gasDays = [...new Set(GASD.map(x => R.gasDay(x.t)))].filter(d => d >= R.gasDay(+now)).map(d => { const hs = GASD.filter(x => R.gasDay(x.t) === d); return { d, p: hs.reduce((s, x) => s + x.p, 0) / hs.length }; });
+const gRate = yearRate.g;
+page('/gasprijs-vandaag/', { app: true, title: `Gasprijs vandaag (${nlDate(TODAY)}) – dynamische gasprijs per m³`, desc: 'De dynamische gasprijs van vandaag per m³, gebaseerd op de day-ahead gasmarkt (TTF), via EnergyZero. Met een schatting incl. energiebelasting en btw.', schema: graph(crumbs(['Gasprijs vandaag', '/gasprijs-vandaag/'])), body: `<header class="pg-h"><h1>Gasprijs vandaag</h1><p>${nlDate(TODAY)}</p></header>${modebar(true)}<section class="sec" aria-labelledby="gas-h"><h2 id="gas-h" class="sr">Gasprijs nu</h2><div data-c="gas">${R.gas(C)}</div>
+${gasDays.length ? `<div class="tbl tbl-w"><table class="rates"><caption>Gasprijs per m³ per gasdag (06:00 tot 06:00 uur)</caption><thead><tr><th scope="col">Gasdag</th><th scope="col">Excl. btw</th><th scope="col">Incl. btw</th><th scope="col">All-in*</th></tr></thead><tbody>${gasDays.map(g => `<tr><th scope="row">${nlDate(g.d, { weekday: 'short', day: 'numeric', month: 'short' })}</th><td>${eur(g.p)}</td><td>${eur(g.p * TAX.vat)}</td><td>${eur((g.p + gRate) * TAX.vat)}</td></tr>`).join('')}</tbody></table></div><p class="note">* Marktprijs + energiebelasting ${rateYear} (${eur(gRate, 5)} per m³) + 21% btw, zonder opslag van je leverancier en zonder vaste kosten. <a href="${BASE}/zo-rekenen-we/">Zo rekenen we</a>.</p>` : ''}</section>
+<div class="prose"><h2>Hoe werkt een dynamische gasprijs?</h2><p>Bij een dynamisch gascontract betaal je de marktprijs voor aardgas plus een vaste opslag van je leverancier, energiebelasting en btw. De marktprijs volgt de Nederlandse groothandelsmarkt TTF en verandert per dag (niet per uur zoals stroom); leveranciers gebruiken een gasdag van 06:00 tot 06:00 uur. Wil je minder gas gebruiken? Check of je <a href="https://cerberostech.github.io/isde-checker/">ISDE-subsidie op een warmtepomp</a> kunt krijgen.</p></div>${placeholder}${updated}` });
 
-// Gas
-const gT = G.today, gMorgen = G.tomorrow;
-page('/gasprijs-vandaag/', { title: `Gasprijs vandaag (${nlDate(TODAY)}) – dynamische gasprijs per m³`, desc: 'De dynamische gasprijs van vandaag per m³, gebaseerd op de day-ahead gasmarkt (TTF), via EnergyZero.', body: `<header class="pg-h"><h1>Gasprijs vandaag</h1><p>${nlDate(TODAY)}</p></header><section class="sec">${gT.length ? `<p class="fig">${eur(avg(gT), 3)}<small>per m³</small></p><p class="note">Gemiddeld per m³ excl. btw. Met 21% btw: ${eur(avg(gT) * VAT, 3)}.</p>${gMorgen.length ? `<p>Morgen: <b>${eur(avg(gMorgen), 3)}</b> per m³ excl. btw.</p>` : ''}${table(gT, 'm³')}` : '<p>Geen gasprijs beschikbaar.</p>'}</section><div class="prose"><h2>Hoe werkt een dynamische gasprijs?</h2><p>Bij een dynamisch gascontract betaal je de marktprijs voor aardgas plus een vaste opslag van je leverancier, energiebelasting en btw. De marktprijs volgt de Nederlandse groothandelsmarkt TTF en verandert per dag (niet per uur zoals stroom); leveranciers gebruiken een gasdag van 06:00 tot 06:00 uur. Wil je minder gas gebruiken? Check of je <a href="https://cerberostech.github.io/isde-checker/">ISDE-subsidie op een warmtepomp</a> kunt krijgen.</p></div>${placeholder}${updated}` });
+// ---------- zo rekenen we ----------
+const red = TAX.reduction[rateYear];
+page('/zo-rekenen-we/', { title: 'Zo rekenen we – schatting van je stroomprijs incl. belasting', desc: `Hoe Stroomprijs de prijs incl. energiebelasting en btw schat: de formule, de tarieven voor ${rateYear} met bron, wat er niet in zit en hoe de prijsklassen A–G werken.`, schema: graph(crumbs(['Zo rekenen we', '/zo-rekenen-we/'])), body: `<header class="pg-h"><h1>Zo rekenen we</h1><p>Wat de getallen op deze site betekenen, en wat ze niet zijn.</p></header><div class="prose">
+<h2>Kale marktprijs</h2><p>Standaard zie je de <b>kale marktprijs</b>: de uitkomst van de day-ahead veiling van EPEX Spot voor Nederland, opgehaald via de publieke API van EnergyZero. Die prijs is <b>exclusief btw</b>, energiebelasting en de opslag van je leverancier. Dit is de enige prijs die we echt meten.</p>
+<h2>Schatting all-in</h2><p>Kies je ‘Schatting all-in’, dan rekenen we per uur:</p><p class="formula">(marktprijs + opslag leverancier + energiebelasting) × 1,21</p><p>De 1,21 is 21% btw. De opslag is standaard 0; vul de inkoopvergoeding van je eigen contract in voor een betere schatting. Je instelling blijft alleen in je eigen browser bewaard.</p>
+<table class="rates"><caption>Energiebelasting ${rateYear}, eerste schijf, excl. btw</caption><thead><tr><th scope="col">Soort</th><th scope="col">Tarief</th><th scope="col">Incl. 21% btw</th></tr></thead><tbody><tr><th scope="row">Elektriciteit (0–10.000 kWh)</th><td>€&nbsp;${nf(yearRate.e, 5)} per kWh</td><td>€&nbsp;${nf(yearRate.e * TAX.vat, 5)}</td></tr><tr><th scope="row">Aardgas (0–170.000 m³)</th><td>€&nbsp;${nf(yearRate.g, 5)} per m³</td><td>€&nbsp;${nf(yearRate.g * TAX.vat, 5)}</td></tr></tbody></table>
+<p>Bron: <a href="${TAX.source}">Belastingdienst, energiebelasting</a> (gecontroleerd op ${shortDate(TAX.checked)}).${TAX.rates[TODAY.slice(0, 4)] ? '' : ` Let op: de tarieven voor ${TODAY.slice(0, 4)} zijn nog niet verwerkt; we gebruiken die van ${TAX.fallback}.`}</p>
+<h2>Wat er niet in zit</h2><ul><li>Vaste leveringskosten van je leverancier.</li><li>Netbeheerkosten (vast bedrag per maand).</li><li>De vermindering energiebelasting: een vast bedrag per jaar per aansluiting${red ? ` (${rateYear}: €&nbsp;${nf(red, 2)} excl. btw)` : ''}. Die hangt niet af van het uur, dus we trekken hem niet af per kWh.</li><li>Kwartierprijzen: sommige leveranciers rekenen per kwartier. Wij tonen uurprijzen.</li></ul><p>De schatting is dus een benadering van wat één extra kWh je op dat uur kost. Je echte rekening staat bij je leverancier.</p>
+<h2>Waarom het goedkoopste moment niet verandert</h2><p>Belasting en opslag zijn per kWh op elk uur van de dag gelijk. Daardoor blijft het goedkoopste uur in beide weergaven hetzelfde uur. Alleen de bedragen veranderen.</p>
+<h2>Prijsklasse A tot G</h2><p>Per dag delen we het verschil tussen het goedkoopste en het duurste uur in zeven gelijke stappen. Een uur in klasse A hoort bij de goedkoopste stap van die dag, klasse G bij de duurste. De kleuren en letters lijken op het energielabel, maar ze zijn relatief per dag: klasse A is niet altijd goedkoop in euro’s. Liggen de prijzen op een dag dicht bij elkaar, dan zeggen we dat erbij.</p>
+<h2>De planner</h2><p>De planner zoekt het aaneengesloten blok uren met de laagste gemiddelde prijs. Het verbruik per apparaat is een voorbeeldwaarde die je zelf aanpast. We rekenen alsof het apparaat gelijkmatig verbruikt; een wasmachine verbruikt in werkelijkheid het meest aan het begin (opwarmen).</p></div>` });
 
-// Dynamisch vs vast
+// ---------- dynamisch vs vast ----------
 const row = (k, a, b) => `<tr><th scope="row">${k}</th><td data-l="Dynamisch">${a}</td><td data-l="Vast">${b}</td></tr>`;
-page('/dynamisch-vs-vast-contract/', { title: 'Dynamisch vs vast energiecontract – de verschillen op een rij', desc: 'Feitelijke vergelijking van een dynamisch, variabel en vast energiecontract: hoe de prijs tot stand komt, risico’s en voor wie het past. Met bronnen.', body: `<header class="pg-h"><h1>Dynamisch vs vast energiecontract</h1></header><section class="sec"><div class="tbl-w"><table class="cmp"><thead><tr><td></td><th scope="col">Dynamisch</th><th scope="col">Vast</th></tr></thead><tbody>${row('Prijs stroom', 'Verandert per uur (day-ahead marktprijs + opslag)', 'Vaste prijs per kWh voor de looptijd (1–5 jaar)')}${row('Prijs gas', 'Verandert per dag', 'Vast voor de looptijd')}${row('Risico', 'Je draagt het marktrisico: pieken én dalen', 'Leverancier draagt het risico; je betaalt daar een premie voor')}${row('Opzeggen', 'Meestal maandelijks opzegbaar', 'Opzegvergoeding mogelijk bij vroegtijdig opzeggen')}${row('Slimme meter', 'Nodig', 'Niet nodig')}${row('Voordeel als…', 'Je verbruik kunt verschuiven (EV, warmtepomp, thuisbatterij, wasmachine)', 'Je zekerheid wilt over je maandbedrag')}</tbody></table></div></section>
-<div class="prose"><h2>Hoe komt de dynamische prijs tot stand?</h2><p>Elke dag rond 12:00 uur sluit de day-ahead veiling van EPEX Spot. Daarin wordt per tijdsblok de groothandelsprijs voor stroom in Nederland voor de volgende dag bepaald. De uitkomst is openbaar via het ENTSO-E Transparency Platform. Je leverancier rekent die prijs door, plus een opslag (inkoopvergoeding), energiebelasting, en 21% btw. Daarnaast betaal je vaste leveringskosten en netbeheerkosten. Op zonnige of winderige momenten kan de marktprijs zelfs negatief worden.</p>
+page('/dynamisch-vs-vast-contract/', { title: 'Dynamisch vs vast energiecontract – de verschillen op een rij', desc: 'Feitelijke vergelijking van een dynamisch, variabel en vast energiecontract: hoe de prijs tot stand komt, risico’s en voor wie het past. Met bronnen.', schema: graph(crumbs(['Dynamisch vs vast contract', '/dynamisch-vs-vast-contract/'])), body: `<header class="pg-h"><h1>Dynamisch vs vast energiecontract</h1></header><section class="sec"><div class="tbl-w"><table class="cmp-t"><thead><tr><td></td><th scope="col">Dynamisch</th><th scope="col">Vast</th></tr></thead><tbody>${row('Prijs stroom', 'Verandert per uur (day-ahead marktprijs + opslag)', 'Vaste prijs per kWh voor de looptijd (1–5 jaar)')}${row('Prijs gas', 'Verandert per dag', 'Vast voor de looptijd')}${row('Risico', 'Je draagt het marktrisico: pieken én dalen', 'Leverancier draagt het risico; je betaalt daar een premie voor')}${row('Opzeggen', 'Meestal maandelijks opzegbaar', 'Opzegvergoeding mogelijk bij vroegtijdig opzeggen')}${row('Slimme meter', 'Nodig', 'Niet nodig')}${row('Voordeel als…', 'Je verbruik kunt verschuiven (EV, warmtepomp, thuisbatterij, wasmachine)', 'Je zekerheid wilt over je maandbedrag')}</tbody></table></div></section>
+<div class="prose"><h2>Hoe komt de dynamische prijs tot stand?</h2><p>Elke dag rond 12:00 uur sluit de day-ahead veiling van EPEX Spot. Daarin wordt per tijdsblok de groothandelsprijs voor stroom in Nederland voor de volgende dag bepaald. De uitkomst is openbaar via het ENTSO-E Transparency Platform. Je leverancier rekent die prijs door, plus een opslag (inkoopvergoeding), energiebelasting, en 21% btw. Daarnaast betaal je vaste leveringskosten en netbeheerkosten. Op zonnige of winderige momenten kan de marktprijs zelfs negatief worden. <a href="${BASE}/zo-rekenen-we/">Zo schatten wij de prijs incl. belasting</a>.</p>
 <h2>Wat zijn de risico’s?</h2><p>Als de groothandelsprijs stijgt, zoals in 2022, stijgt je rekening direct mee. Bij een vast contract ben je daartegen beschermd zolang het contract loopt. Een dynamisch contract loont vooral als je stroom gebruikt wanneer die goedkoop is.</p>
 <h2>Terugleveren en de salderingsregeling</h2><p>De salderingsregeling voor zonnepanelen stopt per 1 januari 2027. Daarna krijg je voor teruggeleverde stroom een terugleververgoeding van je leverancier. Bij een dynamisch contract hangt die vergoeding vaak af van de uurprijs, dus op momenten met negatieve prijzen kan terugleveren geld kosten. Check de voorwaarden van je leverancier.</p>
 <h2>Bronnen</h2><ul><li><a href="https://www.consuwijzer.nl/energie/energiecontract/dynamisch-energiecontract">ConsuWijzer (ACM): dynamisch energiecontract</a></li><li><a href="https://www.rijksoverheid.nl/onderwerpen/energie-thuis/salderingsregeling">Rijksoverheid: salderingsregeling</a></li><li><a href="https://www.belastingdienst.nl/wps/wcm/connect/nl/energiebelasting/energiebelasting">Belastingdienst: energiebelasting</a></li><li><a href="https://transparency.entsoe.eu/">ENTSO-E Transparency Platform</a></li><li><a href="https://www.epexspot.com/en/market-results">EPEX Spot market results</a></li></ul></div>${placeholder}` });
 
-// FAQ
+// ---------- FAQ ----------
 const faq = [
   ['Waar komen deze prijzen vandaan?', 'Uit de day-ahead veiling van EPEX Spot voor Nederland (ook gepubliceerd op het ENTSO-E Transparency Platform). We halen ze elk uur op via de gratis, publieke API van EnergyZero.'],
-  ['Zijn dit de prijzen die ik betaal?', 'Nee, dit is de kale marktprijs. Je betaalt daarbovenop de opslag van je leverancier, energiebelasting, 21% btw, vaste leveringskosten en netbeheerkosten. Het verloop over de dag (wanneer het goedkoop is) is wel gelijk.'],
+  ['Zijn dit de prijzen die ik betaal?', 'Nee, standaard zie je de kale marktprijs excl. btw. Je betaalt daarbovenop de opslag van je leverancier, energiebelasting, 21% btw, vaste leveringskosten en netbeheerkosten. Het verloop over de dag (wanneer het goedkoop is) is wel gelijk.'],
+  ['Wat is de schatting all-in?', `Met de knop ‘Schatting all-in’ tellen we per kWh de energiebelasting (${rateYear}: ${nf(yearRate.e * 100, 3)} ct excl. btw) en eventueel je eigen leveranciersopslag op bij de marktprijs, en rekenen we 21% btw. Vaste kosten en de vermindering energiebelasting zitten er niet in. Het is een benadering; de pagina ‘Zo rekenen we’ legt het uit.`],
+  ['Wat betekenen de letters A tot G?', 'Per dag verdelen we het verschil tussen het goedkoopste en het duurste uur in zeven gelijke stappen. A is de goedkoopste stap van die dag, G de duurste. De letters zijn relatief per dag, dus geen vaste prijsgrens.'],
   ['Hoe laat zijn de prijzen van morgen bekend?', 'De day-ahead veiling sluit rond 12:00 uur. De uitslag is meestal rond 13:00 uur bekend; deze site ververst elk uur, dus uiterlijk een uur later staan ze hier.'],
-  ['Waarom is de stroomprijs soms negatief?', 'Als er veel zon- en windstroom is en weinig vraag, is er meer aanbod dan nodig. Producenten betalen dan soms om hun stroom kwijt te raken. Met een dynamisch contract kun je daarvan profiteren.'],
-  ['Wanneer kan ik het beste mijn wasmachine aanzetten?', 'Op het dashboard staat per dag het goedkoopste blok van 2 uur (wasmachine), 3 uur (vaatwasser/droger) en 4 uur (auto laden).'],
+  ['Waarom is de stroomprijs soms negatief?', 'Als er veel zon- en windstroom is en weinig vraag, is er meer aanbod dan nodig. Producenten betalen dan soms om hun stroom kwijt te raken. Met een dynamisch contract kun je daarvan profiteren, al betaal je over elke kWh nog wel energiebelasting.'],
+  ['Wanneer kan ik het beste mijn wasmachine aanzetten?', 'Gebruik de planner op het dashboard. Kies je apparaat, pas de duur en het verbruik aan, en je ziet het goedkoopste aaneengesloten blok vanaf nu, wat het kost en hoeveel je bespaart. Je kunt het blok ook in je agenda zetten.'],
   ['Hoe gebruik ik de agenda-feed?', 'Voeg de .ics-link toe als geabonneerde agenda in Google Agenda, Outlook of Apple Agenda. Je ziet dan automatisch het goedkoopste blok van 3 uur van vandaag en morgen.'],
-  ['Kost deze site geld of verzamelt hij gegevens?', 'Nee. De site is gratis, zonder account en zonder cookies van ons. Zie de privacypagina.'],
+  ['Kost deze site geld of verzamelt hij gegevens?', 'Nee. De site is gratis, zonder account en zonder cookies van ons. Je instellingen (weergave, opslag, kleurenschema) blijven alleen in je eigen browser. Zie de privacypagina.'],
 ];
-page('/veelgestelde-vragen/', { title: 'Veelgestelde vragen over dynamische energieprijzen', desc: 'Antwoorden op veelgestelde vragen over dynamische stroom- en gasprijzen, negatieve prijzen en wanneer de prijzen van morgen bekend zijn.', schema: { '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: faq.map(([q, a]) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })) }, body: `<header class="pg-h"><h1>Veelgestelde vragen</h1></header><div class="faq">${faq.map(([q, a]) => `<section class="qa"><h2>${esc(q)}</h2><p>${esc(a)}</p></section>`).join('')}</div>` });
+page('/veelgestelde-vragen/', { title: 'Veelgestelde vragen over dynamische energieprijzen', desc: 'Antwoorden op veelgestelde vragen over dynamische stroom- en gasprijzen, de schatting incl. belasting, prijsklassen, negatieve prijzen en wanneer de prijzen van morgen bekend zijn.', schema: graph({ '@type': 'FAQPage', mainEntity: faq.map(([q, a]) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })) }, crumbs(['Veelgestelde vragen', '/veelgestelde-vragen/'])), body: `<header class="pg-h"><h1>Veelgestelde vragen</h1></header><div class="faq">${faq.map(([q, a]) => `<section class="qa"><h2>${esc(q)}</h2><p>${esc(a)}</p></section>`).join('')}</div>` });
 
-// Privacy
-page('/privacy/', { title: 'Privacy & disclosure – Stroomprijs', desc: 'Privacyverklaring en disclosure: bol.com-partnerlinks, geen account, open bron.', body: `<header class="pg-h"><h1>Privacy &amp; disclosure</h1></header><div class="prose"><h2>Affiliatelinks van bol.com</h2><p>Wij zijn <b>partner van bol.com</b>. In het blok ‘Handig om je stroomverbruik te meten’ staan links naar zoekresultaten op bol.com, bijvoorbeeld voor een P1-meter of een slimme stekker met energiemeter. Koop je via zo’n link iets, dan krijgen wij een kleine commissie van bol.com. Jij betaalt daarvoor niets extra.</p><p>Die links staan alleen op het <a href="${BASE}/">dashboard</a> en onder elke <a href="${BASE}/gidsen/">gids</a>. Ze zijn gemarkeerd als gesponsord (<code>rel="sponsored"</code>) en hebben het label ‘Affiliatelinks’. De commissie heeft <b>geen invloed op de prijzen</b> die we tonen: die komen rechtstreeks uit de day-ahead markt (zie hieronder).</p><p>Met energieleveranciers of energievergelijkers hebben we geen affiliate- of partnerafspraken. We verdienen niets aan je keuze voor een energiecontract. Op de site staat een duidelijk gemarkeerde lege plek waar in de toekomst mogelijk een vergelijkingswidget (bijvoorbeeld via Daisycon) komt. Als dat gebeurt, passen we deze pagina aan en markeren we die links als affiliate.</p><h2>Privacy</h2><p>Geen account, geen formulieren, geen eigen cookies. De site wordt gehost op GitHub Pages; GitHub kan technische gegevens zoals je IP-adres loggen (zie de <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">privacyverklaring van GitHub</a>). We tellen bezoeken anoniem met <a href="https://www.goatcounter.com/help/privacy">GoatCounter</a>: zonder cookies en zonder persoonsgegevens. Klik je op een bol.com-link, dan ga je naar de site van bol.com; daar geldt het privacy- en cookiebeleid van bol.com.</p><h2>Data</h2><p>Prijzen: EnergyZero publieke API, gebaseerd op EPEX Spot day-ahead (ENTSO-E). We doen ons best, maar geven geen garantie op juistheid. Geen financieel advies.</p><p>Gemaakt door CerberosTech. Broncode: <a href="https://github.com/CerberosTech/stroomprijs">GitHub</a>.</p></div>` });
+// ---------- privacy ----------
+page('/privacy/', { title: 'Privacy & disclosure – Stroomprijs', desc: 'Privacyverklaring en disclosure: bol.com-partnerlinks, geen account, open bron.', body: `<header class="pg-h"><h1>Privacy &amp; disclosure</h1></header><div class="prose"><h2>Affiliatelinks van bol.com</h2><p>Wij zijn <b>partner van bol.com</b>. In het blok ‘Handig om je stroomverbruik te meten’ staan links naar zoekresultaten op bol.com, bijvoorbeeld voor een P1-meter of een slimme stekker met energiemeter. Koop je via zo’n link iets, dan krijgen wij een kleine commissie van bol.com. Jij betaalt daarvoor niets extra.</p><p>Die links staan alleen op het <a href="${BASE}/">dashboard</a> en onder elke <a href="${BASE}/gidsen/">gids</a>. Ze zijn gemarkeerd als gesponsord (<code>rel="sponsored"</code>) en hebben het label ‘Affiliatelinks’. De commissie heeft <b>geen invloed op de prijzen</b> die we tonen: die komen rechtstreeks uit de day-ahead markt (zie hieronder).</p><p>Met energieleveranciers of energievergelijkers hebben we geen affiliate- of partnerafspraken. We verdienen niets aan je keuze voor een energiecontract. Op de site staat een duidelijk gemarkeerde lege plek waar in de toekomst mogelijk een vergelijkingswidget (bijvoorbeeld via Daisycon) komt. Als dat gebeurt, passen we deze pagina aan en markeren we die links als affiliate.</p><h2>Privacy</h2><p>Geen account, geen formulieren, geen eigen cookies. De site wordt gehost op GitHub Pages; GitHub kan technische gegevens zoals je IP-adres loggen (zie de <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">privacyverklaring van GitHub</a>). We tellen bezoeken anoniem met <a href="https://www.goatcounter.com/help/privacy">GoatCounter</a>: zonder cookies en zonder persoonsgegevens. Klik je op een bol.com-link, dan ga je naar de site van bol.com; daar geldt het privacy- en cookiebeleid van bol.com.</p><p>Je instellingen op deze site (kale prijs of schatting, je leveranciersopslag, licht of donker) bewaren we met <code>localStorage</code> in je eigen browser. Ze worden nergens naartoe gestuurd. Wis ze via de instellingen van je browser.</p><h2>Data</h2><p>Prijzen: EnergyZero publieke API, gebaseerd op EPEX Spot day-ahead (ENTSO-E). We doen ons best, maar geven geen garantie op juistheid. Geen financieel advies. <a href="${BASE}/zo-rekenen-we/">Zo rekenen we</a>.</p><p>Gemaakt door CerberosTech. Broncode: <a href="https://github.com/CerberosTech/stroomprijs">GitHub</a>.</p></div>` });
 
-// 404
+// ---------- 404 ----------
 page('/404.html', { title: 'Pagina niet gevonden – Stroomprijs', desc: 'Deze pagina bestaat niet.', body: `<header class="pg-h"><h1>Pagina niet gevonden</h1><p>Deze pagina bestaat niet (meer).</p></header><p><a class="btn" href="${BASE}/">Naar de actuele stroomprijs</a></p>` });
 
 // ---------- gidsen: content/gidsen/*.md -> /gidsen/<slug>/ ----------
@@ -438,7 +208,6 @@ const GUIDES_DIR = 'content/gidsen';
 const isDay = s => { const d = new Date(s + 'T12:00:00Z'); return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(d) && d.toISOString().slice(0, 10) === s; };
 const plain = s => s.replace(/[*_`\\]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 const dropTitleH1 = (body, title) => body.replace(/^\s*#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*(?:\n|$)/, (h, t) => plain(t) === plain(title) ? '' : h);
-const shortDate = s => new Date(s + 'T12:00:00Z').toLocaleDateString('nl-NL', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 function loadGuides() {
   let files = [];
   try { files = fs.readdirSync(GUIDES_DIR).filter(f => f.endsWith('.md')).sort(); } catch (e) { if (e.code !== 'ENOENT') console.warn('gidsen: cannot read', GUIDES_DIR, e.message); return []; }
@@ -463,23 +232,25 @@ const AI_NOTE = '<p class="ai-note">Deze gids is geschreven met hulp van AI en g
 const publisher = { '@type': 'Organization', name: 'Stroomprijs', url: SITE + '/', logo: { '@type': 'ImageObject', url: `${SITE}/icon-512.png` } };
 for (const g of guides) {
   const p = `/gidsen/${g.slug}/`;
-  page(p, { title: `${g.title} – Stroomprijs`, desc: g.desc, type: 'article', modified: g.updated || undefined, schema: { '@context': 'https://schema.org', '@type': 'Article', headline: g.title, description: g.desc, ...(g.published ? { datePublished: g.published } : {}), ...(g.updated ? { dateModified: g.updated } : {}), url: SITE + p, mainEntityOfPage: SITE + p, inLanguage: 'nl-NL', image: `${SITE}/og.png`, author: { '@type': 'Organization', name: 'CerberosTech', url: 'https://github.com/CerberosTech' }, publisher }, body: `<header class="pg-h"><p class="crumb"><a href="${BASE}/gidsen/">Gidsen</a></p><h1>${esc(g.title)}</h1><p>${esc(g.desc)}</p></header><article class="prose">${g.html}${AI_NOTE}</article>${meet}${g.updated ? `<p class="updated">Bijgewerkt op <time datetime="${g.updated}">${shortDate(g.updated)}</time>.</p>` : ''}` });
+  page(p, { title: `${g.title} – Stroomprijs`, desc: g.desc, type: 'article', modified: g.updated || undefined, schema: graph({ '@type': 'Article', headline: g.title, description: g.desc, ...(g.published ? { datePublished: g.published } : {}), ...(g.updated ? { dateModified: g.updated } : {}), url: SITE + p, mainEntityOfPage: SITE + p, inLanguage: 'nl-NL', image: `${SITE}/og.png`, author: { '@type': 'Organization', name: 'CerberosTech', url: 'https://github.com/CerberosTech' }, publisher }, crumbs(['Gidsen', '/gidsen/'], [g.title, p])), body: `<header class="pg-h"><p class="crumb"><a href="${BASE}/gidsen/">Gidsen</a></p><h1>${esc(g.title)}</h1><p>${esc(g.desc)}</p></header><article class="prose">${g.html}${AI_NOTE}</article>${meet}${g.updated ? `<p class="updated">Bijgewerkt op <time datetime="${g.updated}">${shortDate(g.updated)}</time>.</p>` : ''}` });
 }
-page('/gidsen/', { title: 'Gidsen over dynamische energieprijzen – Stroomprijs', desc: 'Praktische gidsen over dynamische stroom- en gasprijzen: hoe ze werken en hoe je slim je verbruik verschuift.', body: `<header class="pg-h"><h1>Gidsen</h1><p>Uitleg over dynamische energieprijzen, stap voor stap.</p></header><section class="sec gi">${guides.length ? `<ul class="guides">${guides.map(g => `<li><h2><a href="${BASE}/gidsen/${g.slug}/">${esc(g.title)}</a></h2><p>${esc(g.desc)}</p>${g.updated ? `<time datetime="${g.updated}">Bijgewerkt ${shortDate(g.updated)}</time>` : ''}</li>`).join('')}</ul>` : `<p class="empty">Er staan nog geen gidsen online. We werken eraan. Kijk intussen bij de <a href="${BASE}/veelgestelde-vragen/">veelgestelde vragen</a> of de <a href="${BASE}/dynamisch-vs-vast-contract/">vergelijking dynamisch vs vast</a>.</p>`}</section>` });
+page('/gidsen/', { title: 'Gidsen over dynamische energieprijzen – Stroomprijs', desc: 'Praktische gidsen over dynamische stroom- en gasprijzen: hoe ze werken en hoe je slim je verbruik verschuift.', schema: graph(crumbs(['Gidsen', '/gidsen/'])), body: `<header class="pg-h"><h1>Gidsen</h1><p>Uitleg over dynamische energieprijzen, stap voor stap.</p></header><section class="sec gi">${guides.length ? `<ul class="guides">${guides.map(g => `<li><h2><a href="${BASE}/gidsen/${g.slug}/">${esc(g.title)}</a></h2><p>${esc(g.desc)}</p>${g.updated ? `<time datetime="${g.updated}">Bijgewerkt ${shortDate(g.updated)}</time>` : ''}</li>`).join('')}</ul>` : `<p class="empty">Er staan nog geen gidsen online. We werken eraan. Kijk intussen bij de <a href="${BASE}/veelgestelde-vragen/">veelgestelde vragen</a> of de <a href="${BASE}/dynamisch-vs-vast-contract/">vergelijking dynamisch vs vast</a>.</p>`}</section>` });
 console.log(`gidsen: ${guides.length} guide(s)`);
 
 // ---------- ICS + RSS ----------
-const icsT = s => s.replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-const evs = [[TODAY, P.today], [TOMORROW, P.tomorrow]].filter(([, a]) => a.length >= 3).map(([d, a]) => { const b = cheapestBlock(a, 3); const s = b.hours[0].t, e = new Date(Date.parse(b.hours[2].t) + 3600e3).toISOString();
-  return ['BEGIN:VEVENT', `UID:goedkoopste-3u-${d}@cerberostech.github.io`, `DTSTAMP:${icsT(now.toISOString())}`, `DTSTART:${icsT(new Date(s).toISOString())}`, `DTEND:${icsT(e)}`, `SUMMARY:⚡ Goedkoopste stroom ${hh(b.start)}-${hh(b.end)} (gem. ${ct(b.avg).replace(',', '.')}/kWh)`, `DESCRIPTION:Goedkoopste blok van 3 uur op ${d} (kale day-ahead prijs excl. btw). Bron: EnergyZero/EPEX. ${SITE}/`, `URL:${SITE}/`, 'TRANSP:TRANSPARENT', 'END:VEVENT'].join('\r\n'); });
+const icsT = ms => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+const evs = [[TODAY, P.today], [TOMORROW, P.tomorrow]].filter(([, a]) => R.cheapest(a, 3)).map(([d, a]) => { const b = R.cheapest(a, 3);
+  return ['BEGIN:VEVENT', `UID:goedkoopste-3u-${d}@cerberostech.github.io`, `DTSTAMP:${icsT(+now)}`, `DTSTART:${icsT(b.start)}`, `DTEND:${icsT(b.end)}`, `SUMMARY:⚡ Goedkoopste stroom ${hh(b.start)}-${hh(b.end)} (gem. ${ct(b.avg).replace(',', '.')}/kWh)`, `DESCRIPTION:Goedkoopste blok van 3 uur op ${d} (kale day-ahead prijs excl. btw). Bron: EnergyZero/EPEX. ${SITE}/`, `URL:${SITE}/`, 'TRANSP:TRANSPARENT', 'END:VEVENT'].join('\r\n'); });
 fs.writeFileSync(path.join(OUT, 'goedkoopste-uren.ics'), ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CerberosTech//Stroomprijs//NL', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Goedkoopste stroom-uren', 'X-WR-TIMEZONE:Europe/Amsterdam', 'REFRESH-INTERVAL;VALUE=DURATION:PT1H', ...evs, 'END:VCALENDAR'].join('\r\n') + '\r\n');
-const rssItems = [[TOMORROW, P.tomorrow], [TODAY, P.today]].filter(([, a]) => a.length >= 3).map(([d, a]) => { const b = cheapestBlock(a, 3), mn = minOf(a), sorted = [...a].sort((x, y) => x.p - y.p).slice(0, 5);
-  return `<item><title>${esc(`Goedkoopste stroom ${nlDate(d)}: ${hh(b.start)}–${hh(b.end)}`)}</title><link>${SITE}/${d === TODAY ? 'stroomprijs-vandaag' : 'stroomprijs-morgen'}/</link><guid isPermaLink="false">stroomprijs-${d}</guid><pubDate>${now.toUTCString()}</pubDate><description>${esc(`Goedkoopste blok van 3 uur: ${hh(b.start)}–${hh(b.end)}, gemiddeld ${ct(b.avg)}/kWh. Goedkoopste uur: ${hh(mn.h)} (${ct(mn.p)}). Top 5 goedkoopste uren: ${sorted.map(x => `${hh(x.h)} (${ct(x.p)})`).join(', ')}. Kale day-ahead prijzen excl. btw, bron EnergyZero/EPEX.`)}</description></item>`; }).join('');
+const rssItems = [[TOMORROW, P.tomorrow], [TODAY, P.today]].filter(([, a]) => R.cheapest(a, 3)).map(([d, a]) => { const b = R.cheapest(a, 3), mn = a.reduce((m, x) => (x.p < m.p ? x : m)), sorted = [...a].sort((x, y) => x.p - y.p).slice(0, 5);
+  return `<item><title>${esc(`Goedkoopste stroom ${nlDate(d)}: ${hh(b.start)}–${hh(b.end)}`)}</title><link>${SITE}/${d === TODAY ? 'stroomprijs-vandaag' : 'stroomprijs-morgen'}/</link><guid isPermaLink="false">stroomprijs-${d}</guid><pubDate>${now.toUTCString()}</pubDate><description>${esc(`Goedkoopste blok van 3 uur: ${hh(b.start)}–${hh(b.end)}, gemiddeld ${ct(b.avg)}/kWh. Goedkoopste uur: ${hh(mn.t)} (${ct(mn.p)}). Top 5 goedkoopste uren: ${sorted.map(x => `${hh(x.t)} (${ct(x.p)})`).join(', ')}. Kale day-ahead prijzen excl. btw, bron EnergyZero/EPEX.`)}</description></item>`; }).join('');
 fs.writeFileSync(path.join(OUT, 'feed.xml'), `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Goedkoopste stroom-uren</title><link>${SITE}/</link><atom:link href="${SITE}/feed.xml" rel="self" type="application/rss+xml"/><description>Dagelijks de goedkoopste uren voor stroom in Nederland (day-ahead).</description><language>nl-nl</language><image><url>${SITE}/icon-192.png</url><title>Goedkoopste stroom-uren</title><link>${SITE}/</link></image><lastBuildDate>${now.toUTCString()}</lastBuildDate>${rssItems}</channel></rss>`);
 
 // ---------- data, sitemap, robots ----------
-fs.writeFileSync(path.join(OUT, 'prices.json'), JSON.stringify({ fetched: data.fetched, source: data.source, status: data.status, unit: 'EUR/kWh (power), EUR/m3 (gas), excl. VAT', today: TODAY, tomorrow: TOMORROW, power: { today: P.today.map(({ t, p }) => ({ t, p })), tomorrow: P.tomorrow.map(({ t, p }) => ({ t, p })) }, gas: { today: G.today.map(({ t, p }) => ({ t, p })), tomorrow: G.tomorrow.map(({ t, p }) => ({ t, p })) } }, null, 1));
-const urls = ['/', '/stroomprijs-vandaag/', '/stroomprijs-morgen/', '/gasprijs-vandaag/', '/dynamisch-vs-vast-contract/', '/veelgestelde-vragen/', '/privacy/', '/gidsen/'].map(u => [u, TODAY]);
+const iso = a => a.map(({ t, p }) => ({ t: new Date(t).toISOString().replace('.000Z', 'Z'), p }));
+const gasDayOf = d => GASD.filter(x => R.at(x.t).day === d);
+fs.writeFileSync(path.join(OUT, 'prices.json'), JSON.stringify({ fetched: data.fetched, source: data.source, status: data.status, unit: 'EUR/kWh (power), EUR/m3 (gas), excl. VAT', today: TODAY, tomorrow: TOMORROW, power: { today: iso(P.today), tomorrow: iso(P.tomorrow) }, gas: { today: iso(gasDayOf(TODAY)), tomorrow: iso(gasDayOf(TOMORROW)) } }, null, 1));
+const urls = ['/', '/stroomprijs-vandaag/', '/stroomprijs-morgen/', '/gasprijs-vandaag/', '/dynamisch-vs-vast-contract/', '/veelgestelde-vragen/', '/privacy/', '/gidsen/', '/zo-rekenen-we/'].map(u => [u, TODAY]);
 for (const g of guides) urls.push([`/gidsen/${g.slug}/`, g.updated]); // no updated date: no lastmod, rather than a false "changed today"
 fs.writeFileSync(path.join(OUT, 'sitemap.xml'), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map(([u, d]) => `<url><loc>${SITE}${u}</loc>${d ? `<lastmod>${d}</lastmod>` : ''}</url>`).join('\n')}\n</urlset>\n`);
 fs.writeFileSync(path.join(OUT, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${SITE}/sitemap.xml\n`);
