@@ -2,6 +2,7 @@
 // Fetches day-ahead power + gas prices from the public EnergyZero API (no key), falls back to data/prices.json.
 import fs from 'node:fs'; import path from 'node:path';
 import { logo, writeAssets } from './lib/brand.mjs';
+import { frontMatter, markdown } from './lib/markdown.mjs';
 const SITE = 'https://cerberostech.github.io/stroomprijs';
 const BASE = '/stroomprijs';
 const OUT = 'dist';
@@ -135,7 +136,7 @@ function dagband(rows, nowH) {
 }
 
 // ---------- layout ----------
-const NAV = [['/', 'Dashboard'], ['/stroomprijs-vandaag/', 'Vandaag'], ['/stroomprijs-morgen/', 'Morgen'], ['/gasprijs-vandaag/', 'Gas'], ['/dynamisch-vs-vast-contract/', 'Dynamisch vs vast'], ['/veelgestelde-vragen/', 'FAQ']];
+const NAV = [['/', 'Dashboard'], ['/stroomprijs-vandaag/', 'Vandaag'], ['/stroomprijs-morgen/', 'Morgen'], ['/gasprijs-vandaag/', 'Gas'], ['/dynamisch-vs-vast-contract/', 'Dynamisch vs vast'], ['/gidsen/', 'Gidsen'], ['/veelgestelde-vragen/', 'FAQ']];
 const LOGO = logo();
 // Tokens: paper/surface/ink for structure, one teal for "cheap" and links, volt yellow only in the brand and the main action,
 // a teal-to-orange diverging scale (grey midpoint) for price levels. Dark mode gets its own steps, not an inversion.
@@ -301,6 +302,24 @@ tbody tr:hover td{background:var(--hover)}
 .prose p,.prose li{font-size:1.0625rem}
 .prose ul{padding-left:1.2rem}
 .prose li{margin:.35rem 0}
+.prose ol{padding-left:1.4rem}
+.prose h3{font-size:1.125rem;font-weight:650;margin:1.75rem 0 .5rem}
+.prose blockquote{margin:1.25rem 0;padding:.1rem 0 .1rem 1rem;border-left:3px solid var(--brand);color:var(--ink-2)}
+.prose code{font:.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--hover);padding:.1em .35em;border-radius:4px}
+.prose pre{background:var(--surface);border:1px solid var(--line);border-radius:.75rem;padding:.9rem 1rem;overflow-x:auto}
+.prose pre code{background:none;padding:0;font-size:.875rem}
+.prose hr{border:0;border-top:1px solid var(--line);margin:2rem 0}
+.prose .ai-note{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.875rem;color:var(--ink-2)}
+.crumb{margin:0 0 .4rem;font-size:.9375rem}
+.sec.gi{margin-bottom:2.5rem}
+.guides{list-style:none;padding:0;margin:0;display:grid;gap:1rem}
+.guides li{border-top:1px solid var(--line);padding-top:1rem}
+.guides li:first-child{border-top:0;padding-top:0}
+.guides h2{margin:0;font-size:1.25rem}
+.guides h2 a{text-decoration:none}
+.guides h2 a:hover{text-decoration:underline}
+.guides p{margin:.35rem 0 0;color:var(--ink)}
+.guides time{font-size:.8125rem;color:var(--ink-2)}
 .cmp th[scope=row]{color:var(--ink);font-size:.9375rem}
 .cmp thead th{font-family:var(--display);font-size:1rem;color:var(--ink)}
 @media(max-width:639px){.cmp thead{display:none}.cmp tr{display:grid;grid-template-columns:1fr 1fr;gap:0 1rem;border-bottom:1px solid var(--line);padding:.6rem 0}.cmp tr:last-child{border-bottom:0}.cmp th,.cmp td{border:0;padding:.2rem 0}.cmp th[scope=row]{grid-column:1/-1;font-family:var(--display);font-size:1rem}.cmp td:before{content:attr(data-l);display:block;font-size:.75rem;font-weight:600;color:var(--ink-2)}}
@@ -333,11 +352,13 @@ pl.addEventListener('keydown',e=>{const m={ArrowRight:1,ArrowLeft:-1,ArrowUp:1,A
 
 const CAL = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>';
 const RSS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/><circle cx="6" cy="18" r="1.2"/></svg>';
-function page(p, { title, desc, body, schema }) {
+const GOATCOUNTER = '<script data-goatcounter="https://stroomprijs.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>';
+const jsonLd = o => JSON.stringify(o).replace(/</g, '\\u003c'); // no "</script>" from content inside the JSON-LD block
+function page(p, { title, desc, body, schema, type = 'website', modified }) {
   const url = SITE + p;
-  const nav = NAV.map(([h, t]) => `<a href="${BASE}${h}"${h === p ? ' aria-current="page"' : ''}>${t}</a>`).join('');
+  const nav = NAV.map(([h, t]) => `<a href="${BASE}${h}"${h === p || (h !== '/' && p.startsWith(h)) ? ' aria-current="page"' : ''}>${t}</a>`).join('');
   const js = /class="(plot|db-g)/.test(body) ? `<script>${JS}</script>` : '';
-  const html = `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><meta name="description" content="${esc(desc)}"><link rel="canonical" href="${url}"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#f3f5f6" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0a1621" media="(prefers-color-scheme: dark)"><link rel="icon" href="${BASE}/icon.svg" type="image/svg+xml"><link rel="icon" href="${BASE}/favicon.png" sizes="64x64" type="image/png"><link rel="apple-touch-icon" href="${BASE}/apple-touch-icon.png"><link rel="manifest" href="${BASE}/site.webmanifest"><meta property="og:type" content="website"><meta property="og:locale" content="nl_NL"><meta property="og:site_name" content="Stroomprijs"><meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(desc)}"><meta property="og:url" content="${url}"><meta property="og:image" content="${SITE}/og.png"><meta property="og:image:type" content="image/png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Stroomprijs: dynamische stroomprijs per uur, vandaag en morgen, met de goedkoopste uren"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${esc(title)}"><meta name="twitter:description" content="${esc(desc)}"><meta name="twitter:image" content="${SITE}/og.png"><link rel="alternate" type="application/rss+xml" title="Goedkoopste uren morgen" href="${SITE}/feed.xml">${schema ? `<script type="application/ld+json">${JSON.stringify(schema)}</script>` : ''}<style>${CSS}</style></head><body><a class="skip" href="#main">Naar de inhoud</a><header class="top"><div class="in"><a class="brand" href="${BASE}/">${LOGO}</a><nav aria-label="Hoofdmenu">${nav}</nav></div></header><main id="main" class="in">${body}</main><footer class="foot"><div class="in">${LOGO}<p>Bron: day-ahead prijzen (EPEX Spot, gepubliceerd via <a href="https://transparency.entsoe.eu/">ENTSO-E</a>) opgehaald via de publieke <a href="https://www.energyzero.nl/">EnergyZero</a>-API. Laatst bijgewerkt: ${esc(fetchedNl)}. Wordt elk uur ververst. Geen advies; controleer de tarieven van je eigen leverancier.</p><p><a href="${BASE}/privacy/">Privacy &amp; disclosure</a> · <a href="${BASE}/feed.xml">RSS</a> · <a href="${BASE}/goedkoopste-uren.ics">Agenda (.ics)</a> · <a href="https://github.com/CerberosTech/stroomprijs">Broncode</a></p><p>Meer gratis tools: <a href="https://cerberostech.github.io/isde-checker/">ISDE-subsidiechecker warmtepompen</a> · <a href="https://cerberostech.github.io/deadorsupported/">Dead or Supported</a></p></div></footer>${js}</body></html>`;
+  const html = `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><meta name="description" content="${esc(desc)}"><link rel="canonical" href="${url}"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#f3f5f6" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0a1621" media="(prefers-color-scheme: dark)"><link rel="icon" href="${BASE}/icon.svg" type="image/svg+xml"><link rel="icon" href="${BASE}/favicon.png" sizes="64x64" type="image/png"><link rel="apple-touch-icon" href="${BASE}/apple-touch-icon.png"><link rel="manifest" href="${BASE}/site.webmanifest"><meta property="og:type" content="${type}">${modified ? `<meta property="article:modified_time" content="${modified}">` : ''}<meta property="og:locale" content="nl_NL"><meta property="og:site_name" content="Stroomprijs"><meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(desc)}"><meta property="og:url" content="${url}"><meta property="og:image" content="${SITE}/og.png"><meta property="og:image:type" content="image/png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Stroomprijs: dynamische stroomprijs per uur, vandaag en morgen, met de goedkoopste uren"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${esc(title)}"><meta name="twitter:description" content="${esc(desc)}"><meta name="twitter:image" content="${SITE}/og.png"><link rel="alternate" type="application/rss+xml" title="Goedkoopste uren morgen" href="${SITE}/feed.xml">${schema ? `<script type="application/ld+json">${jsonLd(schema)}</script>` : ''}${GOATCOUNTER}<style>${CSS}</style></head><body><a class="skip" href="#main">Naar de inhoud</a><header class="top"><div class="in"><a class="brand" href="${BASE}/">${LOGO}</a><nav aria-label="Hoofdmenu">${nav}</nav></div></header><main id="main" class="in">${body}</main><footer class="foot"><div class="in">${LOGO}<p>Bron: day-ahead prijzen (EPEX Spot, gepubliceerd via <a href="https://transparency.entsoe.eu/">ENTSO-E</a>) opgehaald via de publieke <a href="https://www.energyzero.nl/">EnergyZero</a>-API. Laatst bijgewerkt: ${esc(fetchedNl)}. Wordt elk uur ververst. Geen advies; controleer de tarieven van je eigen leverancier.</p><p><a href="${BASE}/privacy/">Privacy &amp; disclosure</a> · <a href="${BASE}/feed.xml">RSS</a> · <a href="${BASE}/goedkoopste-uren.ics">Agenda (.ics)</a> · <a href="https://github.com/CerberosTech/stroomprijs">Broncode</a></p><p>Meer gratis tools: <a href="https://cerberostech.github.io/isde-checker/">ISDE-subsidiechecker warmtepompen</a> · <a href="https://cerberostech.github.io/deadorsupported/">Dead or Supported</a></p></div></footer>${js}</body></html>`;
   const f = path.join(OUT, p, p.endsWith('/') ? 'index.html' : ''); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, html);
 }
 
@@ -398,10 +419,47 @@ const faq = [
 page('/veelgestelde-vragen/', { title: 'Veelgestelde vragen over dynamische energieprijzen', desc: 'Antwoorden op veelgestelde vragen over dynamische stroom- en gasprijzen, negatieve prijzen en wanneer de prijzen van morgen bekend zijn.', schema: { '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: faq.map(([q, a]) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })) }, body: `<header class="pg-h"><h1>Veelgestelde vragen</h1></header><div class="faq">${faq.map(([q, a]) => `<section class="qa"><h2>${esc(q)}</h2><p>${esc(a)}</p></section>`).join('')}</div>` });
 
 // Privacy
-page('/privacy/', { title: 'Privacy & disclosure – Stroomprijs', desc: 'Privacyverklaring en disclosure: geen affiliates, geen account, open bron.', body: `<header class="pg-h"><h1>Privacy &amp; disclosure</h1></header><div class="prose"><h2>Geen affiliates (nog)</h2><p>Deze site heeft op dit moment <b>geen affiliate- of partnerafspraken</b> met energieleveranciers of vergelijkers. We verdienen niets aan je keuze. Op de site staat een duidelijk gemarkeerde lege plek waar in de toekomst mogelijk een vergelijkingswidget (bijvoorbeeld via Daisycon) komt. Als dat gebeurt, passen we deze pagina aan en markeren we die links als affiliate.</p><h2>Privacy</h2><p>Geen account, geen formulieren, geen eigen cookies. De site wordt gehost op GitHub Pages; GitHub kan technische gegevens zoals je IP-adres loggen (zie de <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">privacyverklaring van GitHub</a>). Eventuele anonieme bezoekersstatistieken zonder cookies vermelden we hier.</p><h2>Data</h2><p>Prijzen: EnergyZero publieke API, gebaseerd op EPEX Spot day-ahead (ENTSO-E). We doen ons best, maar geven geen garantie op juistheid. Geen financieel advies.</p><p>Gemaakt door CerberosTech. Broncode: <a href="https://github.com/CerberosTech/stroomprijs">GitHub</a>.</p></div>` });
+page('/privacy/', { title: 'Privacy & disclosure – Stroomprijs', desc: 'Privacyverklaring en disclosure: geen affiliates, geen account, open bron.', body: `<header class="pg-h"><h1>Privacy &amp; disclosure</h1></header><div class="prose"><h2>Geen affiliates (nog)</h2><p>Deze site heeft op dit moment <b>geen affiliate- of partnerafspraken</b> met energieleveranciers of vergelijkers. We verdienen niets aan je keuze. Op de site staat een duidelijk gemarkeerde lege plek waar in de toekomst mogelijk een vergelijkingswidget (bijvoorbeeld via Daisycon) komt. Als dat gebeurt, passen we deze pagina aan en markeren we die links als affiliate.</p><h2>Privacy</h2><p>Geen account, geen formulieren, geen eigen cookies. De site wordt gehost op GitHub Pages; GitHub kan technische gegevens zoals je IP-adres loggen (zie de <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">privacyverklaring van GitHub</a>). We tellen bezoeken anoniem met <a href="https://www.goatcounter.com/help/privacy">GoatCounter</a>: zonder cookies en zonder persoonsgegevens.</p><h2>Data</h2><p>Prijzen: EnergyZero publieke API, gebaseerd op EPEX Spot day-ahead (ENTSO-E). We doen ons best, maar geven geen garantie op juistheid. Geen financieel advies.</p><p>Gemaakt door CerberosTech. Broncode: <a href="https://github.com/CerberosTech/stroomprijs">GitHub</a>.</p></div>` });
 
 // 404
 page('/404.html', { title: 'Pagina niet gevonden – Stroomprijs', desc: 'Deze pagina bestaat niet.', body: `<header class="pg-h"><h1>Pagina niet gevonden</h1><p>Deze pagina bestaat niet (meer).</p></header><p><a class="btn" href="${BASE}/">Naar de actuele stroomprijs</a></p>` });
+
+// ---------- gidsen: content/gidsen/*.md -> /gidsen/<slug>/ ----------
+// Front matter: title, description, slug, optional updated and published (YYYY-MM-DD). A missing folder or a bad file never breaks the build.
+// The page h1 is the title, so a leading "# <title>" in the body is dropped; any other "#" heading renders as h2.
+const GUIDES_DIR = 'content/gidsen';
+const isDay = s => { const d = new Date(s + 'T12:00:00Z'); return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(d) && d.toISOString().slice(0, 10) === s; };
+const plain = s => s.replace(/[*_`\\]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+const dropTitleH1 = (body, title) => body.replace(/^\s*#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*(?:\n|$)/, (h, t) => plain(t) === plain(title) ? '' : h);
+const shortDate = s => new Date(s + 'T12:00:00Z').toLocaleDateString('nl-NL', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+function loadGuides() {
+  let files = [];
+  try { files = fs.readdirSync(GUIDES_DIR).filter(f => f.endsWith('.md')).sort(); } catch (e) { if (e.code !== 'ENOENT') console.warn('gidsen: cannot read', GUIDES_DIR, e.message); return []; }
+  const seen = new Set(), out = [];
+  for (const f of files) {
+    try {
+      const { meta, body } = frontMatter(fs.readFileSync(path.join(GUIDES_DIR, f), 'utf8'));
+      const slug = (meta.slug || '').trim(), title = (meta.title || '').trim();
+      if (!title || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) { console.warn(`gidsen: skip ${f} (needs a title and a slug of a-z, 0-9 and "-")`); continue; }
+      if (seen.has(slug)) { console.warn(`gidsen: skip ${f} (slug "${slug}" already used)`); continue; }
+      const day = k => { const v = (meta[k] || '').trim(); if (v && !isDay(v)) console.warn(`gidsen: ${f} has an invalid ${k} date "${v}" (use YYYY-MM-DD); ignored`); return isDay(v) ? v : ''; };
+      const updated = day('updated'), published = day('published') || updated;
+      seen.add(slug);
+      out.push({ f, slug, title, desc: (meta.description || '').trim() || title, updated, published, html: markdown(dropTitleH1(body, title), { base: BASE }) });
+    } catch (e) { console.warn(`gidsen: skip ${f}:`, e.message); }
+  }
+  return out.sort((a, b) => (b.updated || '').localeCompare(a.updated || '') || a.title.localeCompare(b.title, 'nl'));
+}
+const guides = loadGuides();
+for (const g of guides) for (const [, s] of g.html.matchAll(new RegExp(`href="${BASE}/gidsen/([^/"]+)/`, 'g'))) if (!guides.some(x => x.slug === s)) console.warn(`gidsen: ${g.f} links to unknown guide "${s}"`);
+const AI_NOTE = '<p class="ai-note">Deze gids is geschreven met hulp van AI en gecontroleerd op bronnen.</p>';
+const publisher = { '@type': 'Organization', name: 'Stroomprijs', url: SITE + '/', logo: { '@type': 'ImageObject', url: `${SITE}/icon-512.png` } };
+for (const g of guides) {
+  const p = `/gidsen/${g.slug}/`;
+  page(p, { title: `${g.title} – Stroomprijs`, desc: g.desc, type: 'article', modified: g.updated || undefined, schema: { '@context': 'https://schema.org', '@type': 'Article', headline: g.title, description: g.desc, ...(g.published ? { datePublished: g.published } : {}), ...(g.updated ? { dateModified: g.updated } : {}), url: SITE + p, mainEntityOfPage: SITE + p, inLanguage: 'nl-NL', image: `${SITE}/og.png`, author: { '@type': 'Organization', name: 'CerberosTech', url: 'https://github.com/CerberosTech' }, publisher }, body: `<header class="pg-h"><p class="crumb"><a href="${BASE}/gidsen/">Gidsen</a></p><h1>${esc(g.title)}</h1><p>${esc(g.desc)}</p></header><article class="prose">${g.html}${AI_NOTE}</article>${g.updated ? `<p class="updated">Bijgewerkt op <time datetime="${g.updated}">${shortDate(g.updated)}</time>.</p>` : ''}` });
+}
+page('/gidsen/', { title: 'Gidsen over dynamische energieprijzen – Stroomprijs', desc: 'Praktische gidsen over dynamische stroom- en gasprijzen: hoe ze werken en hoe je slim je verbruik verschuift.', body: `<header class="pg-h"><h1>Gidsen</h1><p>Uitleg over dynamische energieprijzen, stap voor stap.</p></header><section class="sec gi">${guides.length ? `<ul class="guides">${guides.map(g => `<li><h2><a href="${BASE}/gidsen/${g.slug}/">${esc(g.title)}</a></h2><p>${esc(g.desc)}</p>${g.updated ? `<time datetime="${g.updated}">Bijgewerkt ${shortDate(g.updated)}</time>` : ''}</li>`).join('')}</ul>` : `<p class="empty">Er staan nog geen gidsen online. We werken eraan. Kijk intussen bij de <a href="${BASE}/veelgestelde-vragen/">veelgestelde vragen</a> of de <a href="${BASE}/dynamisch-vs-vast-contract/">vergelijking dynamisch vs vast</a>.</p>`}</section>` });
+console.log(`gidsen: ${guides.length} guide(s)`);
 
 // ---------- ICS + RSS ----------
 const icsT = s => s.replace(/[-:]/g, '').replace(/\.\d{3}/, '');
@@ -414,8 +472,9 @@ fs.writeFileSync(path.join(OUT, 'feed.xml'), `<?xml version="1.0" encoding="UTF-
 
 // ---------- data, sitemap, robots ----------
 fs.writeFileSync(path.join(OUT, 'prices.json'), JSON.stringify({ fetched: data.fetched, source: data.source, status: data.status, unit: 'EUR/kWh (power), EUR/m3 (gas), excl. VAT', today: TODAY, tomorrow: TOMORROW, power: { today: P.today.map(({ t, p }) => ({ t, p })), tomorrow: P.tomorrow.map(({ t, p }) => ({ t, p })) }, gas: { today: G.today.map(({ t, p }) => ({ t, p })), tomorrow: G.tomorrow.map(({ t, p }) => ({ t, p })) } }, null, 1));
-const urls = ['/', '/stroomprijs-vandaag/', '/stroomprijs-morgen/', '/gasprijs-vandaag/', '/dynamisch-vs-vast-contract/', '/veelgestelde-vragen/', '/privacy/'];
-fs.writeFileSync(path.join(OUT, 'sitemap.xml'), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map(u => `<url><loc>${SITE}${u}</loc><lastmod>${TODAY}</lastmod></url>`).join('\n')}\n</urlset>\n`);
+const urls = ['/', '/stroomprijs-vandaag/', '/stroomprijs-morgen/', '/gasprijs-vandaag/', '/dynamisch-vs-vast-contract/', '/veelgestelde-vragen/', '/privacy/', '/gidsen/'].map(u => [u, TODAY]);
+for (const g of guides) urls.push([`/gidsen/${g.slug}/`, g.updated]); // no updated date: no lastmod, rather than a false "changed today"
+fs.writeFileSync(path.join(OUT, 'sitemap.xml'), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map(([u, d]) => `<url><loc>${SITE}${u}</loc>${d ? `<lastmod>${d}</lastmod>` : ''}</url>`).join('\n')}\n</urlset>\n`);
 fs.writeFileSync(path.join(OUT, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${SITE}/sitemap.xml\n`);
 fs.writeFileSync(path.join(OUT, '.nojekyll'), '');
 console.log('built', fs.readdirSync(OUT).length, 'entries');
