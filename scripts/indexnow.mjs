@@ -6,6 +6,10 @@
 //   node scripts/indexnow.mjs                 submit every URL in the LIVE sitemap
 //   node scripts/indexnow.mjs <url> [<url>..] submit only these URLs
 //   node scripts/indexnow.mjs --dry           show what would be sent, send nothing
+//   node scripts/indexnow.mjs --local --dry   read dist/sitemap.xml instead of the live one (check a build before deploy)
+//
+// The sitemap lists every Dutch and English (/en/) page, so both languages are submitted. Only <loc> entries are read;
+// the xhtml:link hreflang alternates in the sitemap point to the same URLs and are not counted twice.
 //
 // The key file must stay published at KEY_LOCATION (keep c667032fb1681709c6c250736a94b6b9.txt in the build output).
 // Because the key lives under /stroomprijs/, only URLs starting with SITE are accepted.
@@ -16,7 +20,7 @@ const ENDPOINT = 'https://api.indexnow.org/indexnow';
 const MAX = 10000; // IndexNow limit per request
 
 const args = process.argv.slice(2);
-const dry = args.includes('--dry');
+const dry = args.includes('--dry'), local = args.includes('--local');
 const explicit = args.filter(a => !a.startsWith('--'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -34,15 +38,16 @@ async function keyLive() {
 }
 
 async function sitemapUrls() {
-  const r = await fetch(`${SITE}sitemap.xml?v=${Date.now()}`, { cache: 'no-store' });
-  if (!r.ok) throw new Error(`sitemap HTTP ${r.status}`);
-  return [...(await r.text()).matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map(m => m[1].replace(/&amp;/g, '&'));
+  let xml;
+  if (local) xml = (await import('node:fs')).readFileSync(new URL('../dist/sitemap.xml', import.meta.url), 'utf8');
+  else { const r = await fetch(`${SITE}sitemap.xml?v=${Date.now()}`, { cache: 'no-store' }); if (!r.ok) throw new Error(`sitemap HTTP ${r.status}`); xml = await r.text(); }
+  return [...xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map(m => m[1].replace(/&amp;/g, '&'));
 }
 
 const urls = [...new Set(explicit.length ? explicit : await sitemapUrls())].filter(u => u.startsWith(SITE));
 console.log(`${urls.length} URLs to submit for ${SITE}`);
 if (!urls.length) process.exit(0);
-if (dry) { console.log(urls.slice(0, 20).join('\n'), urls.length > 20 ? '\n…' : ''); process.exit(0); }
+if (dry || local) { console.log(urls.slice(0, 40).join('\n'), urls.length > 40 ? '\n…' : ''); process.exit(0); } // --local is for checking only, never sent
 if (!(await keyLive())) { console.error(`key file ${KEY_LOCATION} not serving the key, aborting`); process.exit(1); }
 
 let ok = true;
