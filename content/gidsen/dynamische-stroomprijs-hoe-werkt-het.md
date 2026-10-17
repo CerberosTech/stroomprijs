@@ -1,5 +1,5 @@
 ---
-title: "Dynamische stroomprijs: hoe werkt het? Morgen goedkoop"
+title: "Dynamische stroomprijs: hoe werkt het?"
 description: Zo komt de dynamische stroomprijs tot stand op de day-ahead-markt, wanneer de prijzen voor morgen bekend zijn en hoe je de goedkope uren vindt.
 slug: dynamische-stroomprijs-hoe-werkt-het
 updated: 2026-10-17
