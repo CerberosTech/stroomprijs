@@ -5,8 +5,6 @@ slug: dynamische-stroomprijs-hoe-werkt-het
 updated: 2026-10-17
 ---
 
-# Dynamische stroomprijs: hoe werkt het en wanneer is stroom morgen goedkoop?
-
 Met een dynamisch energiecontract volgt je stroomprijs de groothandelsmarkt. Daardoor verschilt de prijs gedurende de dag. Zo werkt het.
 
 ## Waar komt de prijs vandaan?
