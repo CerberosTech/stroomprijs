@@ -1,11 +1,11 @@
 ---
-title: "Goedkoopste uren stroom vandaag: zo plan je je verbruik"
+title: "Goedkoopste uren stroom: zo plan je verbruik"
 description: Vind de goedkoopste uren voor stroom vandaag en plan je wasmachine, vaatwasser of elektrische auto slim met een dynamisch energiecontract.
 slug: goedkoopste-uren-stroom-vandaag
 updated: 2026-10-17
 ---
 
-# Goedkoopste uren stroom vandaag: zo plan je je verbruik
+# Goedkoopste uren stroom: zo plan je verbruik
 
 Met een dynamisch contract betaal je voor elektriciteit een prijs die per uur (of per kwartier) kan verschillen [1][2]. Verschuif je verbruik naar de goedkope momenten, dan betaal je minder voor dezelfde kWh. Hoeveel dat scheelt, hangt af van je verbruik en de prijzen van die dag.
 
