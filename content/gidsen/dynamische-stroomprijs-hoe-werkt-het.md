@@ -33,7 +33,7 @@ Dat verschilt per dag en hangt onder meer af van hoeveel wind- en zonnestroom er
 - [Stroomprijs morgen](https://cerberostech.github.io/stroomprijs/stroomprijs-morgen/)
 - Op de [homepage](https://cerberostech.github.io/stroomprijs/) zie je het goedkoopste blok van 3 uur.
 
-Twijfel je over je contractvorm? Lees [Dynamisch vs. vast contract](https://cerberostech.github.io/stroomprijs/dynamisch-vs-vast-contract/). Hoe je je verbruik plant lees je in [Goedkoopste uren stroom vandaag](goedkoopste-uren-stroom-vandaag).
+Twijfel je over je contractvorm? Lees [Dynamisch vs. vast contract](https://cerberostech.github.io/stroomprijs/dynamisch-vs-vast-contract/). Hoe je je verbruik plant lees je in [Goedkoopste uren stroom vandaag](goedkoopste-uren-stroom-vandaag). Heb je zonnepanelen? Lees dan wat er verandert in [Einde salderingsregeling 2027](einde-salderingsregeling-2027-dynamisch-contract).
 
 ## Bronnen
 
