@@ -2,7 +2,7 @@
 title: "Dynamic electricity prices in the Netherlands: how do they work?"
 description: How the Dutch dynamic electricity price is set on the day-ahead market, when tomorrow's prices are published and how to find the cheap hours.
 slug: dynamic-electricity-price-how-it-works
-updated: 2026-10-17
+updated: 2026-10-20
 ---
 
 With a dynamic energy contract, your electricity price follows the wholesale market, so it changes throughout the day. Here is how it works.
@@ -33,7 +33,7 @@ It varies from day to day and depends partly on how much wind and solar power th
 - [Electricity price tomorrow](https://cerberostech.github.io/stroomprijs/en/electricity-price-tomorrow/)
 - The [homepage](https://cerberostech.github.io/stroomprijs/en/) shows the cheapest 3-hour block.
 
-Not sure which type of contract suits you? Read [Dynamic vs fixed contract](https://cerberostech.github.io/stroomprijs/en/dynamic-vs-fixed-contract/). For how to plan your usage, see [Cheapest hours for electricity today](cheapest-electricity-hours-today).
+Not sure which type of contract suits you? Read [Dynamic vs fixed contract](https://cerberostech.github.io/stroomprijs/en/dynamic-vs-fixed-contract/). For how to plan your usage, see [Cheapest hours for electricity today](cheapest-electricity-hours-today). Have solar panels? Read what changes in [End of net metering in 2027](end-of-net-metering-2027-dynamic-contract).
 
 ## Sources
 
