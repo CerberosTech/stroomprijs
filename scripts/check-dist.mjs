@@ -9,7 +9,7 @@ const errs = [], ok = m => console.log('ok  ', m), err = m => errs.push(m);
 const file = u => { let p = u.replace(SITE, '').replace(/^\/stroomprijs(?=\/|$)/, '').split('#')[0].split('?')[0]; if (p === '') p = '/'; return path.join(OUT, p.endsWith('/') ? p + 'index.html' : p); };
 const pages = []; (function walk(d) { for (const f of fs.readdirSync(d)) { const p = path.join(d, f); if (fs.statSync(p).isDirectory()) walk(p); else if (f.endsWith('.html')) pages.push(p); } })(OUT);
 const urlOf = f => { const r = '/' + path.relative(OUT, f).replace(/index\.html$/, ''); return r; };
-const PAIRS = { '/': '/en/', '/stroomprijs-vandaag/': '/en/electricity-price-today/', '/stroomprijs-morgen/': '/en/electricity-price-tomorrow/', '/gasprijs-vandaag/': '/en/gas-price-today/', '/dynamisch-vs-vast-contract/': '/en/dynamic-vs-fixed-contract/', '/veelgestelde-vragen/': '/en/faq/', '/zo-rekenen-we/': '/en/methodology/', '/privacy/': '/en/privacy/', '/gidsen/': '/en/guides/', '/over/': '/en/about/', '/gidsen/dynamische-stroomprijs-hoe-werkt-het/': '/en/guides/dynamic-electricity-price-how-it-works/', '/gidsen/goedkoopste-uren-stroom-vandaag/': '/en/guides/cheapest-electricity-hours-today/' };
+const PAIRS = { '/': '/en/', '/stroomprijs-vandaag/': '/en/electricity-price-today/', '/stroomprijs-morgen/': '/en/electricity-price-tomorrow/', '/gasprijs-vandaag/': '/en/gas-price-today/', '/dynamisch-vs-vast-contract/': '/en/dynamic-vs-fixed-contract/', '/veelgestelde-vragen/': '/en/faq/', '/zo-rekenen-we/': '/en/methodology/', '/privacy/': '/en/privacy/', '/affiliate-disclosure/': '/en/affiliate-disclosure/', '/gidsen/': '/en/guides/', '/over/': '/en/about/', '/gidsen/dynamische-stroomprijs-hoe-werkt-het/': '/en/guides/dynamic-electricity-price-how-it-works/', '/gidsen/goedkoopste-uren-stroom-vandaag/': '/en/guides/cheapest-electricity-hours-today/', '/gidsen/einde-salderingsregeling-2027-dynamisch-contract/': '/en/guides/end-of-net-metering-2027-dynamic-contract/' };
 // 1. routes
 for (const [nl, en] of Object.entries(PAIRS)) for (const u of [nl, en]) fs.existsSync(file(u)) ? 0 : err(`missing route ${u}`);
 ok(`${Object.keys(PAIRS).length * 2} paired routes checked`);
@@ -85,7 +85,7 @@ const STATIC = /const STATIC_UPDATED = '(\d{4}-\d{2}-\d{2})'/.exec(fs.readFileSy
 const fm = dir => fs.readdirSync(dir).filter(f => f.endsWith('.md')).map(f => { const t = fs.readFileSync(path.join(dir, f), 'utf8'), g = k => (new RegExp(`^${k}:\\s*(.+)$`, 'm').exec(t.split(/^---$/m)[1] || '') || [])[1]?.trim(); return { slug: g('slug'), day: g('updated') || g('date') }; });
 const want = {};
 for (const u of ['/', '/stroomprijs-vandaag/', '/stroomprijs-morgen/', '/gasprijs-vandaag/']) want[u] = want[PAIRS[u]] = LIVE;
-for (const u of ['/dynamisch-vs-vast-contract/', '/veelgestelde-vragen/', '/zo-rekenen-we/', '/privacy/', '/over/']) want[u] = want[PAIRS[u]] = STATIC;
+for (const u of ['/dynamisch-vs-vast-contract/', '/veelgestelde-vragen/', '/zo-rekenen-we/', '/privacy/', '/affiliate-disclosure/', '/over/']) want[u] = want[PAIRS[u]] = STATIC;
 for (const [dir, base] of [['content/gidsen', '/gidsen/'], ['content/guides-en', '/en/guides/']]) { const gs = fm(dir); for (const g of gs) want[`${base}${g.slug}/`] = g.day; want[base] = gs.map(g => g.day).filter(Boolean).sort().pop() || STATIC; }
 const ldNodes = h => [...h.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].flatMap(m => { try { const j = JSON.parse(m[1]); return j['@graph'] || [j]; } catch (e) { return []; } });
 for (const [u, d] of Object.entries(want)) {
@@ -123,5 +123,59 @@ ok(`GoatCounter click events: ${clicks} links tagged: ${Object.entries(events).s
 const enPages = pages.filter(f => f.startsWith(path.join(OUT, 'en') + path.sep)), noGc = enPages.filter(f => !/<script data-goatcounter="https:\/\/stroomprijs\.goatcounter\.com\/count" async src="\/\/gc\.zgo\.at\/count\.js"><\/script>/.test(fs.readFileSync(f, 'utf8')));
 for (const f of noGc) err(`${f}: no GoatCounter script tag`);
 ok(`GoatCounter script tag on ${enPages.length - noGc.length} of ${enPages.length} English pages (dist/en/**/*.html)`);
+// Coolblue Energie affiliate links (Awin). Parsed as strings only: never request awin1.com or coolblue.nl.
+// Every such link is a tracked cread.php URL with the approved ids, rel="sponsored", and a GoatCounter event
+// aff-coolblue-<clickref>. Cards only on the home page and the contract / switch / saldering guides.
+const COOLBLUE = { awinmid: '85163', awinaffid: '3125920', landing: 'https://www.coolblue.nl/energie' };
+const COOLBLUE_PAGES = {
+  '/': 'sp-home', '/en/': 'sp-en-home',
+  '/dynamisch-vs-vast-contract/': 'sp-dynamisch-vs-vast-contract', '/en/dynamic-vs-fixed-contract/': 'sp-dynamic-vs-fixed-contract',
+  '/gidsen/dynamische-stroomprijs-hoe-werkt-het/': 'sp-dynamische-stroomprijs-hoe-werkt-het', '/en/guides/dynamic-electricity-price-how-it-works/': 'sp-dynamic-electricity-price-how-it-works',
+  '/gidsen/einde-salderingsregeling-2027-dynamisch-contract/': 'sp-einde-salderingsregeling-2027', '/en/guides/end-of-net-metering-2027-dynamic-contract/': 'sp-end-of-net-metering-2027',
+};
+const DISC = { nl: 'Advertentie: via deze link ontvangen we mogelijk een vergoeding van Coolblue Energie, zonder extra kosten voor jou.', en: 'Sponsored: we may earn a fee from Coolblue Energie via this link, at no extra cost to you.' };
+const discHref = en => `${BASE}${en ? '/en/affiliate-disclosure/' : '/affiliate-disclosure/'}`;
+let coolblue = 0; const coolblueBefore = errs.length;
+for (const [u, h] of Object.entries(html)) {
+  if (u.startsWith('/google') || u.startsWith('/a95c')) continue;
+  const en = u.startsWith('/en/'), want = COOLBLUE_PAGES[u];
+  const cards = h.match(/<aside class="aff-card"[\s\S]*?<\/aside>/g) || [];
+  if (cards.length !== (want ? 1 : 0)) err(`${u}: ${cards.length} Coolblue cards, want ${want ? 1 : 0}`);
+  const anchors = [...h.matchAll(/<a\s[^>]*>/g)].map(m => ({ tag: m[0], href: (attr(m[0], 'href') || '').replace(/&amp;/g, '&') }));
+  const tracked = anchors.filter(a => /awin1\.com|coolblue\.nl/i.test(a.href));
+  if (tracked.length !== (want ? 1 : 0)) err(`${u}: ${tracked.length} Coolblue/Awin links, want ${want ? 1 : 0}`);
+  for (const a of tracked) {
+    coolblue++;
+    let parsed; try { parsed = new URL(a.href); } catch (e) { err(`${u}: Coolblue href is not a URL`); continue; }
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'www.awin1.com' || parsed.pathname !== '/cread.php') err(`${u}: Coolblue link is not the Awin tracking URL (${parsed.hostname}${parsed.pathname})`);
+    if (parsed.searchParams.get('awinmid') !== COOLBLUE.awinmid) err(`${u}: awinmid ${parsed.searchParams.get('awinmid')}`);
+    if (parsed.searchParams.get('awinaffid') !== COOLBLUE.awinaffid) err(`${u}: awinaffid ${parsed.searchParams.get('awinaffid')}`);
+    if (parsed.searchParams.get('ued') !== COOLBLUE.landing) err(`${u}: ued ${parsed.searchParams.get('ued')}`);
+    const clickref = parsed.searchParams.get('clickref') || '';
+    if (clickref !== want) err(`${u}: clickref ${clickref}, want ${want}`);
+    if (!/^sp-[a-z0-9-]+$/.test(clickref) || clickref.length > 50) err(`${u}: clickref ${clickref} is empty, odd, or longer than 50 characters`);
+    const rel = (attr(a.tag, 'rel') || '').split(/\s+/).filter(Boolean);
+    if (rel.join(' ') !== 'sponsored nofollow noopener') err(`${u}: rel="${rel.join(' ')}", want "sponsored nofollow noopener"`);
+    if (attr(a.tag, 'target') !== '_blank') err(`${u}: Coolblue link target ${attr(a.tag, 'target')}`);
+    if (attr(a.tag, 'data-goatcounter-click') !== `aff-coolblue-${clickref}`) err(`${u}: GoatCounter event ${attr(a.tag, 'data-goatcounter-click')}`);
+  }
+  if (want && cards[0]) {
+    const card = cards[0];
+    const sentence = en ? DISC.en : DISC.nl, other = en ? DISC.nl : DISC.en;
+    if (!card.includes(sentence) || card.includes(other)) err(`${u}: disclosure sentence missing or in the wrong language`);
+    const disc = [...card.matchAll(/<a [^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2] === sentence);
+    if (!disc || disc[1] !== discHref(en)) err(`${u}: disclosure line does not link to ${discHref(en)}`);
+    const cta = en ? 'Compare / switch to Coolblue Energie' : 'Vergelijk / overstappen naar Coolblue Energie';
+    if (!new RegExp(`<a class="btn"[^>]*>${cta.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</a>`).test(card)) err(`${u}: CTA text missing`);
+    if ((u === '/' || u === '/en/') && !(h.indexOf('data-c="chart"') < h.indexOf('class="aff-card"') && h.indexOf('class="aff-card"') < h.indexOf('data-c="stats"'))) err(`${u}: card is not under the price chart`);
+    if (h.indexOf('class="aff-card"') > h.indexOf('<footer')) err(`${u}: card is in the footer`);
+  }
+}
+for (const [nl, en] of [['/affiliate-disclosure/', '/en/affiliate-disclosure/']]) for (const u of [nl, en]) {
+  const h = html[u] || '';
+  if (!h.includes(u.startsWith('/en/') ? DISC.en : DISC.nl)) err(`${u}: disclosure page does not repeat the card sentence`);
+  if (/<aside class="aff-card"/.test(h)) err(`${u}: disclosure page should explain the card, not repeat it`);
+}
+if (errs.length === coolblueBefore) ok(`Coolblue Energie: ${coolblue} tracked links, rel=sponsored, awinmid ${COOLBLUE.awinmid}, awinaffid ${COOLBLUE.awinaffid}`);
 console.log(errs.length ? `\n${errs.length} PROBLEMS:\n` + errs.join('\n') : '\nALL CHECKS PASSED');
 process.exit(errs.length ? 1 : 0);
