@@ -110,7 +110,7 @@ let clicks = 0; const events = {};
 for (const [u, h] of Object.entries(html)) {
   const foot = h.indexOf('<footer');
   for (const m of h.matchAll(/<a [^>]*>/g)) {
-    const a = m[0], href = (attr(a, 'href') || '').replace(/&amp;/g, '&'), ev = attr(a, 'data-goatcounter-click'), tool = /^https:\/\/cerberostech\.github\.io\/(isde-checker|deadorsupported|belastingcalculator)\//.exec(href)?.[1];
+    const a = m[0], href = (attr(a, 'href') || '').replace(/&amp;/g, '&'), ev = attr(a, 'data-goatcounter-click'), tool = /^https:\/\/cerberostech\.github\.io\/(isde-checker|deadorsupported|belastingcalculator|woningmarkt)\//.exec(href)?.[1];
     const w = href.startsWith('https://partner.bol.com/') ? 'bol-' + new URL(href).searchParams.get('name') : /\.ics(?:[?#]|$)/.test(href) ? 'ics-download' : /\/feed\.xml(?:[?#]|$)/.test(href) ? 'rss-feed' : /\/prices\.json(?:[?#]|$)/.test(href) ? 'data-json' : tool ? (foot >= 0 && m.index > foot ? 'footer-' : 'tool-') + tool : null;
     if (w && ev !== w) err(`${u}: ${href.slice(0, 60)} has click event ${ev}, want ${w}`);
     if (/class="btn[ "]/.test(a) && !ev) err(`${u}: CTA button ${href} has no click event`);
@@ -120,6 +120,31 @@ for (const [u, h] of Object.entries(html)) {
   if (h.includes('id="plan-ics"')) { if (!/<button [^>]*id="plan-ics"[^>]*data-goatcounter-click="plan-ics"/.test(h)) err(`${u}: #plan-ics has no plan-ics click event`); if (!/goatcounterBound && typeof window\.goatcounter\?\.count === 'function'\) window\.goatcounter\.count\(\{ path: 'plan-ics', event: true \}\)/.test(h)) err(`${u}: generated .ics download is not counted`); }
 }
 ok(`GoatCounter click events: ${clicks} links tagged: ${Object.entries(events).sort().map(([k, v]) => `${k} ${v}`).join(', ')}`);
+// Sister-site footer: one plain followed link to each of the four CerberosTech tools, on every generated page.
+// English woningmarkt points at /en/ (that path returned HTTP 200). Verification files are not pages.
+const SISTER_LINKS = {
+  nl: [['https://cerberostech.github.io/belastingcalculator/', 'Belastingcalculator 2026 (netto salaris, zzp)'], ['https://cerberostech.github.io/isde-checker/', 'ISDE-subsidie warmtepomp checker'], ['https://cerberostech.github.io/woningmarkt/', 'Woningmarkt per gemeente'], ['https://cerberostech.github.io/deadorsupported/', 'DeadOrSupported: is your device still getting updates?']],
+  en: [['https://cerberostech.github.io/belastingcalculator/en/', 'Dutch tax calculator 2026'], ['https://cerberostech.github.io/isde-checker/en/', 'ISDE heat pump subsidy checker'], ['https://cerberostech.github.io/woningmarkt/en/', 'Dutch housing market by municipality'], ['https://cerberostech.github.io/deadorsupported/', 'DeadOrSupported: is your device still getting updates?']],
+};
+let sisterPages = 0;
+for (const [u, h] of Object.entries(html)) {
+  if (u.startsWith('/google') || u.startsWith('/a95c')) continue;
+  sisterPages++;
+  const en = u.startsWith('/en/'), title = en ? 'More free tools' : 'Meer gratis tools';
+  const foot = h.slice(h.indexOf('<footer'));
+  const nav = /<nav class="sisters"[\s\S]*?<\/nav>/.exec(foot)?.[0];
+  if (!nav) { err(`${u}: no sister-sites footer`); continue; }
+  if (!nav.includes(`<h2>${title}</h2>`) || !nav.includes(`aria-label="${title}"`)) err(`${u}: sister title, want ${title}`);
+  if ((nav.match(/<nav class="sisters"/g) || []).length !== 1 || (foot.match(/<nav class="sisters"/g) || []).length !== 1) err(`${u}: sister nav is not exactly once`);
+  for (const [href, text] of SISTER_LINKS[en ? 'en' : 'nl']) {
+    const n = nav.split(href).length - 1;
+    if (n !== 1) err(`${u}: ${href} appears ${n} times in the sister nav`);
+    if (!nav.includes(`>${text}</a>`)) err(`${u}: missing anchor “${text}”`);
+  }
+  if (/rel="[^"]*(nofollow|sponsored)/.test(nav)) err(`${u}: sister link is nofollow or sponsored`);
+  if (/[?&](utm_|awin|clickref|fbclid)/.test(nav)) err(`${u}: sister link has tracking parameters`);
+}
+ok(`sister footer on ${sisterPages} pages: 4 plain links each`);
 const enPages = pages.filter(f => f.startsWith(path.join(OUT, 'en') + path.sep)), noGc = enPages.filter(f => !/<script data-goatcounter="https:\/\/stroomprijs\.goatcounter\.com\/count" async src="\/\/gc\.zgo\.at\/count\.js"><\/script>/.test(fs.readFileSync(f, 'utf8')));
 for (const f of noGc) err(`${f}: no GoatCounter script tag`);
 ok(`GoatCounter script tag on ${enPages.length - noGc.length} of ${enPages.length} English pages (dist/en/**/*.html)`);
