@@ -165,7 +165,7 @@ const NAV = {
 // Dutch page <-> English page. Every pair gets hreflang nl/en/x-default (x-default = Dutch), sitemap alternates and the
 // header switcher. Guide pairs (NL slug -> EN slug) are added when both guide files exist. No automatic redirects.
 const PAIRS = [['/', '/en/'], ['/stroomprijs-vandaag/', '/en/electricity-price-today/'], ['/stroomprijs-morgen/', '/en/electricity-price-tomorrow/'], ['/gasprijs-vandaag/', '/en/gas-price-today/'], ['/dynamisch-vs-vast-contract/', '/en/dynamic-vs-fixed-contract/'], ['/veelgestelde-vragen/', '/en/faq/'], ['/zo-rekenen-we/', '/en/methodology/'], ['/privacy/', '/en/privacy/'], ['/affiliate-disclosure/', '/en/affiliate-disclosure/'], ['/gidsen/', '/en/guides/'], ['/over/', '/en/about/']];
-const GUIDE_PAIRS = { 'dynamische-stroomprijs-hoe-werkt-het': 'dynamic-electricity-price-how-it-works', 'goedkoopste-uren-stroom-vandaag': 'cheapest-electricity-hours-today', 'einde-salderingsregeling-2027-dynamisch-contract': 'end-of-net-metering-2027-dynamic-contract' };
+const GUIDE_PAIRS = { 'dynamische-stroomprijs-hoe-werkt-het': 'dynamic-electricity-price-how-it-works', 'goedkoopste-uren-stroom-vandaag': 'cheapest-electricity-hours-today', 'einde-salderingsregeling-2027-dynamisch-contract': 'end-of-net-metering-2027-dynamic-contract', 'energiecontract-overstappen-opzegtermijn-opzegvergoeding': 'switching-energy-contract-notice-period-termination-fee' };
 const ALT = {}; // path -> { nl, en }
 const pair = (nl, en) => { ALT[nl] = ALT[en] = { nl, en }; };
 for (const [nl, en] of PAIRS) pair(nl, en);
