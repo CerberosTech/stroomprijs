@@ -50,6 +50,8 @@ De ACM adviseert om zonnestroom zoveel mogelijk te gebruiken op het moment dat j
 
 Kijk in je contract wat er over salderen staat. De wettelijke regeling stopt op 1 januari 2027 en je leverancier kan die datum niet uitstellen, maar het kan zijn dat je volgens je contract toch recht hebt op salderen. Je leverancier moet je verbruik en teruglevering opsplitsen in de periode tot en met 31 december 2026 en de periode vanaf 1 januari 2027 [2]. Twijfel je, vraag het dan na bij je leverancier.
 
+Wil je overstappen naar een ander contract? Lees eerst [Energiecontract overstappen: wanneer, opzegtermijn en opzegvergoeding](https://cerberostech.github.io/stroomprijs/gidsen/energiecontract-overstappen-opzegtermijn-opzegvergoeding/), zodat je weet of je een opzegvergoeding betaalt.
+
 Let ook op hoe terugleverkosten in je contract staan. In het modelcontract dat leveranciers sinds 1 januari 2026 verplicht moeten aanbieden, worden terugleverkosten per teruggeleverde kWh berekend [6].
 
 ## Bronnen
